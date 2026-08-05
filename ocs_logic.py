@@ -17,7 +17,7 @@ from email.mime.application import MIMEApplication
 # =====================================================================
 # CONFIG  (edit these for your setup — same values as ocs_master.py)
 # =====================================================================
-SMTP_HOST = "smtp.iitd.ac.in";  SMTP_PORT = 465
+SMTP_HOST = "smtp.iitd.ac.in";  SMTP_PORT = 587
 IMAP_HOST = "mailstore.iitd.ac.in"; IMAP_PORT = 993
 SENT_FOLDER = "Sent"
 
@@ -31,7 +31,7 @@ SUBJECT_KEY = "iit delhi hiring invitation"
 
 PER_SHEET   = 3
 DELAY_SEC   = 60
-TIMEOUT     = 60
+TIMEOUT     = 15
 MAX_RETRIES = 2
 LOG_SHEET   = "Sent Log"
 SHEETS = ["Design", "Thermal", "Production", "Industrial"]
@@ -354,15 +354,35 @@ def is_rate_limit(t):
 
 def send_one(pw, recipients, raw):
     ctx = ssl.create_default_context()
+    last_error = ""
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=TIMEOUT) as server:
-                server.login(FROM_ADDR, pw)
-                server.sendmail(FROM_ADDR, recipients + CC + BCC, raw)
+            if SMTP_PORT == 465:
+                with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=TIMEOUT) as server:
+                    server.login(FROM_ADDR, pw)
+                    server.sendmail(FROM_ADDR, recipients + CC + BCC, raw)
+            else:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT) as server:
+                    server.ehlo()
+                    server.starttls(context=ctx)
+                    server.ehlo()
+                    server.login(FROM_ADDR, pw)
+                    server.sendmail(FROM_ADDR, recipients + CC + BCC, raw)
+
             return True
+
         except Exception as e:
-            if is_rate_limit(e): raise RateLimitHit(str(e))
-            if attempt < MAX_RETRIES: time.sleep(15)
+            last_error = str(e)
+            print(f"SMTP send failed on attempt {attempt}: {last_error}", flush=True)
+
+            if is_rate_limit(e):
+                raise RateLimitHit(str(e))
+
+            if attempt < MAX_RETRIES:
+                time.sleep(15)
+
+    print(f"SMTP send ultimately failed: {last_error}", flush=True)
     return False
 
 def save_to_sent(pw, raw):
