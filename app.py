@@ -148,24 +148,36 @@ def login():
 # =====================================================================
 @app.route("/")
 def dashboard():
+    return page(f"""
+    <div class="card">
+      <h2>Choose dashboard</h2>
+      <a class="btn" href="{url_for('hr_view')}">HR call log / lookup</a>
+      <a class="btn secondary" href="{url_for('mail_dashboard')}">Mail dashboard</a>
+    </div>
+    """)
+
+@app.route("/mail")
+@login_required
+def mail_dashboard():
     if IITD_WEBMAIL_PASSWORD:
         pw_ready = "stored in Render env ✓"
     else:
         pw_ready = "cached ✓" if get_cached_pw() else "not entered"
+
     return page(f"""
     <div class="card">
-      <h2>What do you want to do?</h2>
+      <h2>Mail dashboard</h2>
       <a class="btn" href="{url_for('continuous_view')}">Continuous pitch sender</a>
       <a class="btn" href="{url_for('single_view')}">Single company sender</a>
       <a class="btn secondary" href="{url_for('bounces_view')}">Check bounces</a>
       <a class="btn secondary" href="{url_for('reconcile_view')}">Reconcile Sent folder</a>
-      <a class="btn secondary" href="{url_for('hr_view')}">HR contact / phone lookup</a>
     </div>
     <div class="card">
       <p class="muted">IITD mailbox password: {pw_ready}</p>
       <form method="post" action="{url_for('forget_password')}">
         <button type="submit" class="danger">Forget cached password</button>
       </form>
+      <a class="btn secondary" href="{url_for('dashboard')}">Back to home</a>
     </div>
     """)
 
@@ -266,7 +278,7 @@ def continuous_status(job_id):
       <h2>Continuous sender — progress</h2>
       <p class="muted">{status_line}</p>
       <ul class="plain">{lines or '<li class="muted">Starting…</li>'}</ul>
-      {'<a class="btn secondary" href="' + url_for('dashboard') + '">Back to menu</a>' if job['done'] else ''}
+      {'<a class="btn secondary" href="' + url_for('mail_dashboard') + '">Back to mail dashboard</a>' if job['done'] else ''}
     </div>"""
     return page(body)
 
@@ -373,7 +385,7 @@ def bounces_view():
           <p class="muted">Scanned {res['scanned']} inbox messages, last {days} days.</p>
           <p>{len(res['bounced'])} bounced address(es) found, {len(res['updated_rows'])} row(s) updated.</p>
           <ul class="plain">{rows}</ul>
-          <a class="btn" href="{url_for('dashboard')}">Back to menu</a></div>"""
+          <a class="btn" href="{url_for('mail_dashboard')}">Back to mail dashboard</a></div>"""
         return page(body)
     body = f"""<div class="card"><h2>Check bounces</h2>
       <form method="post">
@@ -399,7 +411,7 @@ def reconcile_view():
           <p class="muted">Scanned {res['scanned']} Sent messages, last {days} days.</p>
           <p>{res['matched']} pitch mail(s) matched · {res['added']} new row(s) added · {res['updated']} row(s) marked SENT.</p>
           <p class="muted">{len(res['unattributed'])} could not be attributed automatically.</p>
-          <a class="btn" href="{url_for('dashboard')}">Back to menu</a></div>"""
+          <a class="btn" href="{url_for('mail_dashboard')}">Back to mail dashboard</a></div>"""
         return page(body)
     body = f"""<div class="card"><h2>Reconcile Sent folder</h2>
       <form method="post">
