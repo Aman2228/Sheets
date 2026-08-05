@@ -654,6 +654,9 @@ CALL_LOG_FIELD_ALIASES = {
     "Phone Number": ["phone number", "phone", "contact no.", "contact number"],
     "Incident":     ["incident", "status", "notes", "remark", "remarks"],
     "Date":         ["Date"],
+    "Caller Name":  ["Caller Name"], 
+    "HR Name":      ["HR Name"],
+    "HR Email":     ["HR Email"]
 }
 
 def _header_key(v):
@@ -707,7 +710,7 @@ def get_call_log_sheet(wb):
     return ws, cols
 
 def append_call_logs(wb, entries):
-    """entries: list of {company, phone, incident, date}. Saves the workbook."""
+    """entries: list of call log records. Saves the workbook."""
     ws, cols = get_call_log_sheet(wb)
     added = 0
 
@@ -718,6 +721,9 @@ def append_call_logs(wb, entries):
         set_cell(ws, r, cols["Phone Number"], e.get("phone", ""))
         set_cell(ws, r, cols["Incident"], e.get("incident", ""))
         set_cell(ws, r, cols["Date"], e.get("date", ""))
+        set_cell(ws, r, cols["Caller Name"], e.get("caller_name", ""))
+        set_cell(ws, r, cols["HR Name"], e.get("hr_name", ""))
+        set_cell(ws, r, cols["HR Email"], e.get("hr_email", ""))
 
         added += 1
 
