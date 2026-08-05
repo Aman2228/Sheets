@@ -48,6 +48,8 @@ DOWNLOADS = "https://ocs.iitd.ac.in/downloads"
 # SMALL HELPERS  (unchanged from ocs_master.py)
 # =====================================================================
 def clean(v): return "" if v is None else str(v).replace("\xa0", " ").strip()
+def set_cell(ws, row, column, value):
+    ws.cell(row=row, column=column).value = value
 
 def norm(value):
     value = clean(value).lower()
@@ -143,7 +145,7 @@ def get_log_sheet(wb):
                 break
         if not found_col:
             found_col = ws.max_column + 1
-            ws.cell(row=1, column=found_col, value=h)
+            set_cell(ws, 1, found_col, h)
         cols[h] = found_col
     return ws, cols
 
@@ -179,15 +181,15 @@ def log_sent(ws, cols, state, resolver, company_display, emails):
         r = r_target
     else:
         r = ws.max_row + 1
-        ws.cell(row=r, column=cols["Company Name"], value=company_display)
+        set_cell(ws, r, cols["Company Name"], company_display)
         state[k] = {"row": r, "sent": True, "delivery": "pending", "emails_tried": set(), "display": company_display}
-    ws.cell(row=r, column=cols["Mail Sent Flag"], value="SENT")
-    ws.cell(row=r, column=cols["Mail Sent Date/Time"], value=ts)
+    set_cell(ws, r, cols["Mail Sent Flag"], "SENT")
+    set_cell(ws, r, cols["Mail Sent Date/Time"], ts)
     old = unique_emails(emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value)))
     merged = unique_emails(old + emails)
-    ws.cell(row=r, column=cols["Emails Sent To"], value=", ".join(merged))
+    set_cell(ws, r, cols["Emails Sent To"], ", ".join(merged))
     if not clean(ws.cell(row=r, column=cols["Delivery Status"]).value):
-        ws.cell(row=r, column=cols["Delivery Status"], value="Pending")
+        set_cell(ws, r, cols["Delivery Status"], "Pending")
     if k in state:
         state[k]["row"] = r; state[k]["sent"] = True
         state[k]["emails_tried"] |= {e.lower() for e in emails}
@@ -570,8 +572,8 @@ def check_bounces(wb, pw, days=14):
         if not failed:      status = "No bounce seen"
         elif len(failed) == len(sent_list): status = "All Failed"
         else:               status = "Partial"
-        ws.cell(row=r, column=cols["Delivery Status"], value=status)
-        ws.cell(row=r, column=cols["Bounced Emails"], value=", ".join(failed))
+        set_cell(ws, r, cols["Delivery Status"], status)
+        set_cell(ws, r, cols["Bounced Emails"], ", ".join(failed))
         if failed:
             updated_rows.append({"company": company, "status": status, "bounced": failed})
     wb.save()
@@ -680,7 +682,7 @@ def get_call_log_sheet(wb):
                 found_col = 1
             else:
                 found_col = ws.max_column + 1
-            ws.cell(row=1, column=found_col, value=field)
+            set_cell(ws, 1, found_col, field)
             header_map[field.lower()] = found_col
         cols[field] = found_col
     return ws, cols
@@ -691,10 +693,10 @@ def append_call_logs(wb, entries):
     added = 0
     for e in entries:
         r = ws.max_row + 1
-        ws.cell(row=r, column=cols["Company"], value=e.get("company", ""))
-        ws.cell(row=r, column=cols["Phone Number"], value=e.get("phone", ""))
-        ws.cell(row=r, column=cols["Incident"], value=e.get("incident", ""))
-        ws.cell(row=r, column=cols["Date"], value=e.get("date", ""))
+        set_cell(ws, r, cols["Company"], e.get("company", ""))
+        set_cell(ws, r, cols["Phone Number"], e.get("phone", ""))
+        set_cell(ws, r, cols["Incident"], e.get("incident", ""))
+        set_cell(ws, r, cols["Date"], e.get("date", ""))
         added += 1
     wb.save()
     return added
@@ -761,18 +763,18 @@ def reconcile_sent(wb, pw, days=30):
                 updated += 1
         else:
             r = ws.max_row + 1
-            ws.cell(row=r, column=cols["Company Name"], value=rec["display"])
+            set_cell(ws, r, cols["Company Name"], rec["display"])
             log_by_name[nk] = r; added += 1
-        ws.cell(row=r, column=cols["Mail Sent Flag"], value="SENT")
+        set_cell(ws, r, cols["Mail Sent Flag"], "SENT")
         if not clean(ws.cell(row=r, column=cols["Mail Sent Date/Time"]).value) and rec["date"]:
-            ws.cell(row=r, column=cols["Mail Sent Date/Time"], value=rec["date"])
+            set_cell(ws, r, cols["Mail Sent Date/Time"], rec["date"])
         existing = [e for e in emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value))]
         merged = existing[:]
         for e in emails_sorted:
             if e not in [x.lower() for x in merged]: merged.append(e)
-        ws.cell(row=r, column=cols["Emails Sent To"], value=", ".join(merged))
+        set_cell(ws, r, cols["Emails Sent To"], ", ".join(merged))
         if not clean(ws.cell(row=r, column=cols["Delivery Status"]).value):
-            ws.cell(row=r, column=cols["Delivery Status"], value="Pending")
+            set_cell(ws, r, cols["Delivery Status"], "Pending")
     wb.save()
     return {"scanned": len(ids), "matched": matched, "added": added, "updated": updated,
             "unattributed": unattr}
