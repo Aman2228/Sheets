@@ -656,48 +656,71 @@ CALL_LOG_FIELD_ALIASES = {
     "Date":         ["Date"],
 }
 
+def _header_key(v):
+    """
+    Normalize sheet headers so that Date, date, Date/Time, Date Time,
+    date-time etc. can be matched more reliably.
+    """
+    return re.sub(r"[^a-z0-9]+", " ", clean(v).lower()).strip()
+
+
 def get_call_log_sheet(wb):
     target = CALL_LOG_SHEET.strip().lower()
     existing_name = None
+
     for name in wb.sheetnames:
         if name.strip().lower() == target:
-            existing_name = name; break
+            existing_name = name
+            break
+
     if existing_name is not None:
-        ws = wb[existing_name]; fresh = False
+        ws = wb[existing_name]
     else:
-        ws = wb.create_sheet(CALL_LOG_SHEET); fresh = True
+        ws = wb.create_sheet(CALL_LOG_SHEET)
+
     header_map = {}
+
     for c in range(1, ws.max_column + 1):
         val = ws.cell(row=1, column=c).value
-        if val is not None and clean(val) != "":
-            header_map[clean(val).lower()] = c
+        hk = _header_key(val)
+        if hk:
+            header_map[hk] = c
+
     cols = {}
+
     for field, aliases in CALL_LOG_FIELD_ALIASES.items():
         found_col = None
+
         for a in aliases:
-            if a in header_map:
-                found_col = header_map[a]; break
+            ak = _header_key(a)
+            if ak in header_map:
+                found_col = header_map[ak]
+                break
+
         if not found_col:
-            if fresh and ws.max_row == 1 and ws.max_column == 1 and ws.cell(row=1, column=1).value in (None, ""):
-                found_col = 1
-            else:
-                found_col = ws.max_column + 1
+            found_col = ws.max_column + 1
             set_cell(ws, 1, found_col, field)
-            header_map[field.lower()] = found_col
+            header_map[_header_key(field)] = found_col
+
         cols[field] = found_col
+
     return ws, cols
 
 def append_call_logs(wb, entries):
     """entries: list of {company, phone, incident, date}. Saves the workbook."""
     ws, cols = get_call_log_sheet(wb)
     added = 0
+
     for e in entries:
         r = ws.max_row + 1
+
         set_cell(ws, r, cols["Company"], e.get("company", ""))
         set_cell(ws, r, cols["Phone Number"], e.get("phone", ""))
         set_cell(ws, r, cols["Incident"], e.get("incident", ""))
         set_cell(ws, r, cols["Date"], e.get("date", ""))
+
         added += 1
+
     wb.save()
     return added
 
