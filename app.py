@@ -24,6 +24,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-change-me")
 
 SPREADSHEET_KEY = os.environ.get("SPREADSHEET_KEY")  # the long ID in the Sheet's URL
 APP_PASSWORD = os.environ.get("APP_PASSWORD")
+IITD_WEBMAIL_PASSWORD = os.environ.get("IITD_WEBMAIL_PASSWORD")
 BROCHURE_PATH = os.environ.get("BROCHURE_FILE_PATH")  # optional, uploaded alongside app.py
 
 # ---- in-memory password cache: {session_id: (password, expires_at)} ----
@@ -36,11 +37,18 @@ def _sid():
     return session["sid"]
 
 def get_cached_pw():
+    if IITD_WEBMAIL_PASSWORD:
+        return IITD_WEBMAIL_PASSWORD
+
     entry = _pw_cache.get(_sid())
-    if not entry: return None
+    if not entry:
+        return None
+
     pw, exp = entry
     if time.time() > exp:
-        _pw_cache.pop(_sid(), None); return None
+        _pw_cache.pop(_sid(), None)
+        return None
+
     return pw
 
 def set_cached_pw(pw):
@@ -101,7 +109,7 @@ BASE = """
   .flash{background:#fff8e1;border:1px solid #ffe08a;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:14px}
 </style></head><body>
 <header><span>OCS Master</span>
-{% if session.get('authed') or not app_password_set %}<a href="{{ url_for('dashboard') }}">Menu</a>{% endif %}
+<a href="{{ url_for('dashboard') }}">Menu</a>
 </header>
 <main>{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}{{ body|safe }}</main>
 </body></html>
@@ -138,9 +146,11 @@ def login():
 # DASHBOARD
 # =====================================================================
 @app.route("/")
-@login_required
 def dashboard():
-    pw_ready = "cached ✓" if get_cached_pw() else "not entered"
+    if IITD_WEBMAIL_PASSWORD:
+        pw_ready = "stored in Render env ✓"
+    else:
+        pw_ready = "cached ✓" if get_cached_pw() else "not entered"
     return page(f"""
     <div class="card">
       <h2>What do you want to do?</h2>
@@ -165,9 +175,13 @@ def forget_password():
     return redirect(url_for("dashboard"))
 
 def password_field(label="IITD mailbox password"):
+    if IITD_WEBMAIL_PASSWORD:
+        return '<p class="muted">Using IITD mailbox password from Render environment.</p>'
+
     cached = get_cached_pw()
     if cached:
         return '<p class="muted">Using cached password (expires in up to 60 min).</p>'
+
     return f"""<label>{label}</label><input type="password" name="password" required>"""
 
 def resolve_pw(form):
@@ -399,7 +413,6 @@ def reconcile_view():
 # HR CONTACT / PHONE LOOKUP  +  CALL LOGS
 # =====================================================================
 @app.route("/hr", methods=["GET"])
-@login_required
 def hr_view():
     query = request.args.get("q", "")
     results_html = ""
@@ -427,7 +440,6 @@ def hr_view():
     return page(body)
 
 @app.route("/hr/<key>", methods=["GET", "POST"])
-@login_required
 def hr_company_view(key):
     wb = get_wb()
     q = request.values.get("q", key)
