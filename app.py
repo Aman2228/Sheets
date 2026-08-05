@@ -624,5 +624,36 @@ def hr_company_view(key):
     </div>"""
     return page(body)
 
+@app.route("/debug-smtp")
+@login_required
+def debug_smtp():
+    import socket
+    import time
+
+    tests = [
+        ("smtp.iitd.ac.in", 465),
+        ("smtp.iitd.ac.in", 587),
+        ("mailstore.iitd.ac.in", 993),
+    ]
+
+    rows = ""
+
+    for host, port in tests:
+        start = time.time()
+        try:
+            s = socket.create_connection((host, port), timeout=10)
+            s.close()
+            rows += f"<li><b>{host}:{port}</b> — CONNECTED in {time.time() - start:.2f}s</li>"
+        except Exception as e:
+            rows += f"<li><b>{host}:{port}</b> — FAILED: {str(e)}</li>"
+
+    return page(f"""
+    <div class="card">
+      <h2>SMTP / IMAP connectivity debug</h2>
+      <ul class="plain">{rows}</ul>
+      <a class="btn secondary" href="{url_for('mail_dashboard') if 'mail_dashboard' in globals() else url_for('dashboard')}">Back</a>
+    </div>
+    """)
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
