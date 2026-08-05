@@ -13,6 +13,7 @@ Security model:
    auto-forgotten after 60 minutes — same behaviour as ocs_master.py's cache.
 """
 import os, time, uuid, threading
+from html import escape
 from functools import wraps
 from flask import Flask, request, redirect, url_for, session, render_template_string
 
@@ -455,14 +456,26 @@ def hr_company_view(key):
     if request.method == "POST":
         phone_raw = request.form.get("phone", "").strip()
         incident = request.form.get("incident", "").strip()
+        caller_name = request.form.get("caller_name", "").strip()
+        hr_name = request.form.get("hr_name", "").strip()
+        hr_email = request.form.get("hr_email", "").strip()
+
         if not phone_raw:
-            flash = "No phone entered — nothing logged."
-        else:
-            entry = {"company": m["display"], "phone": phone_raw, "incident": incident,
-                      "date": time.strftime("%Y-%m-%d")}
-            L.append_call_logs(wb, [entry])
-            flash = f"Logged call to {phone_raw} for {m['display']}."
-        return page(f"""<div class="card"><h2>Call logged</h2><p>Logged call to {phone_raw} for {m['display']}.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
+            return page(f"""<div class="card"><h2>Nothing logged</h2><p>No phone number was entered.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
+
+    entry = {
+        "company": m["display"],
+        "phone": phone_raw,
+        "incident": incident,
+        "date": time.strftime("%Y-%m-%d"),
+        "caller_name": caller_name,
+        "hr_name": hr_name,
+        "hr_email": hr_email,
+    }
+
+    L.append_call_logs(wb, [entry])
+
+    return page(f"""<div class="card"><h2>Call logged</h2><p>Logged call to {phone_raw} for {m['display']}.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
 
     rows = "".join(
         f"""<tr><td>{c['sheet']}</td><td>{c['name'] or '-'}</td>
@@ -470,10 +483,7 @@ def hr_company_view(key):
         for c in m["contacts"]
     ) or '<tr><td colspan="4" class="muted">No HR name/email/phone on file.</td></tr>'
 
-    phone_options = "".join(
-        f'<option value="{c["phone"]}">{c["name"] or c["phone"]} ({c["phone"]})</option>'
-        for c in m["contacts"] if c["phone"]
-    )
+    phone_options = "".join(f'<option value="{escape(c["phone"])}" data-name="{escape(c["name"])}" data-email="{escape(c["email"])}">{escape(c["name"] or c["phone"])} ({escape(c["phone"])})</option>'for c in m["contacts"] if c["phone"])
 
     body = f"""
     <div class="card">
@@ -488,14 +498,30 @@ def hr_company_view(key):
       <h2>Log a call</h2>
       <form method="post">
         <label>Pick an existing contact's number</label>
-        <select name="phone_pick" onchange="document.getElementsByName('phone')[0].value=this.value">
-          <option value="">— or type a number below —</option>
-          {phone_options}
-        </select>
-        <label>Phone number to log</label>
+        <select name="phone_pick" onchange="
+          document.getElementsByName('phone')[0].value=this.value;
+          document.getElementsByName('hr_name')[0].value=this.options[this.selectedIndex].dataset.name || '';
+          document.getElementsByName('hr_email')[0].value=this.options[this.selectedIndex].dataset.email || '';
+        ">
+           <option value="">— or type a number below —</option>
+           {phone_options}
+         </select>
+
+        <label>Phone Number</label>
         <input type="text" name="phone" placeholder="Type or pick above">
-        <label>Incident (what happened)</label>
+
+        <label>Incident</label>
         <input type="text" name="incident" placeholder="e.g. spoke to HR, follow up next week">
+
+        <label>Caller Name</label>
+        <input type="text" name="caller_name" placeholder="e.g. Aman">
+
+        <label>HR Name</label>
+        <input type="text" name="hr_name" placeholder="e.g. Priya Sharma">
+
+        <label>HR Email</label>
+        <input type="text" name="hr_email" placeholder="e.g. priya@company.com">
+
         <button type="submit">Save call log</button>
       </form>
       <a class="btn secondary" href="{url_for('hr_view', q=q)}">Back to search</a>
