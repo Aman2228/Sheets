@@ -450,7 +450,7 @@ def hr_company_view(key):
                       "date": time.strftime("%Y-%m-%d")}
             L.append_call_logs(wb, [entry])
             flash = f"Logged call to {phone_raw} for {m['display']}."
-        return redirect(url_for("hr_company_view", key=key, q=q))
+        return page(f"""<div class="card"><h2>Call logged</h2><p>Logged call to {phone_raw} for {m['display']}.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
 
     rows = "".join(
         f"""<tr><td>{c['sheet']}</td><td>{c['name'] or '-'}</td>
