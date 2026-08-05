@@ -582,6 +582,123 @@ def check_bounces(wb, pw, days=14):
 # =====================================================================
 GREET_RE = re.compile(r"Dear\s+(.+?)\s+(?:Recruitment\s+)?Team\b", re.I | re.S)
 
+def build_hr_contact_directory(wb, companies, resolver):
+    """Reads all four sheets, returns canonical_company_key -> list of
+    {sheet, company, name, email, phone}. Ported unchanged from ocs_master.py."""
+    contacts = {}
+    for sheet_name in SHEETS:
+        if sheet_name not in wb.sheetnames:
+            continue
+        ws = wb[sheet_name]
+        company_col = detect_col(ws, "Company Name")
+        hr_name_col = detect_col(ws, "HR Name")
+        hr_email_col = detect_col(ws, "HR Email")
+        hr_phone_col = detect_col(ws, "HR Phone")
+        if company_col is None:
+            continue
+        current_company_name = None
+        current_company_key = None
+        for row in range(2, ws.max_row + 1):
+            company_name = clean(ws.cell(row=row, column=company_col).value)
+            if company_name:
+                current_company_name = company_name
+                current_company_key = resolver.key_for_name_only(company_name)
+            if current_company_key is None:
+                continue
+            hr_name = clean(ws.cell(row=row, column=hr_name_col).value) if hr_name_col else ""
+            hr_email = clean(ws.cell(row=row, column=hr_email_col).value) if hr_email_col else ""
+            hr_phone = clean(ws.cell(row=row, column=hr_phone_col).value) if hr_phone_col else ""
+            if not hr_name and not hr_email and not hr_phone:
+                continue
+            placeholder_values = {"have to find", "production", "thermal", "industrial", "design", "na"}
+            if (hr_name.lower() in placeholder_values and hr_email.lower() in placeholder_values
+                    and hr_phone.lower() in placeholder_values):
+                continue
+            contacts.setdefault(current_company_key, []).append({
+                "sheet": sheet_name, "company": current_company_name,
+                "name": hr_name, "email": hr_email, "phone": hr_phone,
+            })
+    cleaned = {}
+    for company_key, rows in contacts.items():
+        seen = set(); unique_rows = []
+        for row in rows:
+            row_key = (row["sheet"].lower(), row["name"].lower(), row["email"].lower(), row["phone"].lower())
+            if row_key not in seen:
+                seen.add(row_key); unique_rows.append(row)
+        cleaned[company_key] = unique_rows
+    return cleaned
+
+def hr_lookup(wb, query):
+    """Search companies + return contact rows for matches. Read-only."""
+    companies, _, resolver = build_company_data(wb)
+    contacts = build_hr_contact_directory(wb, companies, resolver)
+    matches = find_matches(query, companies)
+    out = []
+    for k in matches:
+        out.append({
+            "key": k,
+            "display": companies[k]["display"],
+            "sheets": sorted(companies[k]["sheets"]),
+            "contacts": contacts.get(k, []),
+        })
+    return out
+
+# =====================================================================
+# CALL LOGS  (append-only into the "Call Logs" sheet)
+# =====================================================================
+CALL_LOG_SHEET = "Call Logs"
+CALL_LOG_FIELD_ALIASES = {
+    "Company":      ["company", "company name"],
+    "Phone Number": ["phone number", "phone", "contact no.", "contact number"],
+    "Incident":     ["incident", "status", "notes", "remark", "remarks"],
+    "Date":         ["date"],
+}
+
+def get_call_log_sheet(wb):
+    target = CALL_LOG_SHEET.strip().lower()
+    existing_name = None
+    for name in wb.sheetnames:
+        if name.strip().lower() == target:
+            existing_name = name; break
+    if existing_name is not None:
+        ws = wb[existing_name]; fresh = False
+    else:
+        ws = wb.create_sheet(CALL_LOG_SHEET); fresh = True
+    header_map = {}
+    for c in range(1, ws.max_column + 1):
+        val = ws.cell(row=1, column=c).value
+        if val is not None and clean(val) != "":
+            header_map[clean(val).lower()] = c
+    cols = {}
+    for field, aliases in CALL_LOG_FIELD_ALIASES.items():
+        found_col = None
+        for a in aliases:
+            if a in header_map:
+                found_col = header_map[a]; break
+        if not found_col:
+            if fresh and ws.max_row == 1 and ws.max_column == 1 and ws.cell(row=1, column=1).value in (None, ""):
+                found_col = 1
+            else:
+                found_col = ws.max_column + 1
+            ws.cell(row=1, column=found_col, value=field)
+            header_map[field.lower()] = found_col
+        cols[field] = found_col
+    return ws, cols
+
+def append_call_logs(wb, entries):
+    """entries: list of {company, phone, incident, date}. Saves the workbook."""
+    ws, cols = get_call_log_sheet(wb)
+    added = 0
+    for e in entries:
+        r = ws.max_row + 1
+        ws.cell(row=r, column=cols["Company"], value=e.get("company", ""))
+        ws.cell(row=r, column=cols["Phone Number"], value=e.get("phone", ""))
+        ws.cell(row=r, column=cols["Incident"], value=e.get("incident", ""))
+        ws.cell(row=r, column=cols["Date"], value=e.get("date", ""))
+        added += 1
+    wb.save()
+    return added
+
 def reconcile_sent(wb, pw, days=30):
     companies, _, resolver = build_company_data(wb)
     n2d = {norm(d["display"]): d["display"] for d in companies.values()}
