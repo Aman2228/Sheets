@@ -653,7 +653,7 @@ CALL_LOG_FIELD_ALIASES = {
     "Company":      ["company", "company name"],
     "Phone Number": ["phone number", "phone", "contact no.", "contact number"],
     "Incident":     ["incident", "status", "notes", "remark", "remarks"],
-    "Date":         ["date"],
+    "Date":         ["Date"],
 }
 
 def get_call_log_sheet(wb):
