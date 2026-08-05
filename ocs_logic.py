@@ -201,34 +201,78 @@ def log_sent(ws, cols, state, resolver, company_display, emails):
 def build_company_data(wb):
     resolver = CompanyResolver()
     raw = {s: [] for s in SHEETS}
+
     for sheet_name in SHEETS:
         if sheet_name not in wb.sheetnames:
             continue
+
         ws = wb[sheet_name]
-        ncol = detect_col(ws, "Company Name"); ecol = detect_col(ws, "HR Email")
+        ncol = detect_col(ws, "Company Name")
+        ecol = detect_col(ws, "HR Email")
+
         if ncol is None or ecol is None:
             continue
+
         bucket = None
+
         for r in range(2, ws.max_row + 1):
             cn = clean(ws.cell(row=r, column=ncol).value)
+
             if cn:
                 bucket = {"name": cn, "emails": []}
                 raw[sheet_name].append(bucket)
-            if bucket is None: continue
+
+            if bucket is None:
+                continue
+
             bucket["emails"].extend(emails_in(ws.cell(row=r, column=ecol).value))
-    companies = {}; order = {s: [] for s in SHEETS}
+
+    companies = {}
+    order = {s: [] for s in SHEETS}
+
     for sheet_name in SHEETS:
         seen = set()
+
         for b in raw[sheet_name]:
             k = resolver.key(b["name"], b["emails"])
+
             if k not in companies:
-                companies[k] = {"display": b["name"], "emails": [], "sheets": set()}
+                companies[k] = {
+                    "display": b["name"],
+                    "emails": [],
+                    "sheets": set(),
+                }
+
             companies[k]["sheets"].add(sheet_name)
             companies[k]["emails"].extend(b["emails"])
+
             if k not in seen:
-                order[sheet_name].append(b["name"]); seen.add(k)
+                order[sheet_name].append(b["name"])
+                seen.add(k)
+
+    # Merge companies/emails discovered from Call Logs.
+    call_log_companies = read_call_log_companies(wb, resolver)
+
+    if call_log_companies:
+        order.setdefault("Call Logs", [])
+
+    for k, d in call_log_companies.items():
+        if k not in companies:
+            companies[k] = {
+                "display": d["display"],
+                "emails": [],
+                "sheets": set(),
+            }
+
+        companies[k]["sheets"].add("Call Logs")
+        companies[k]["emails"].extend(d["emails"])
+
+        if d["display"] not in order["Call Logs"]:
+            order["Call Logs"].append(d["display"])
+
     for k in companies:
         companies[k]["emails"] = unique_emails(companies[k]["emails"])
+
     return companies, order, resolver
 
 # =====================================================================
@@ -628,6 +672,33 @@ def build_hr_contact_directory(wb, companies, resolver):
             if row_key not in seen:
                 seen.add(row_key); unique_rows.append(row)
         cleaned[company_key] = unique_rows
+        # Also include contacts discovered from Call Logs.
+    call_log_companies = read_call_log_companies(wb, resolver)
+
+    for company_key, data in call_log_companies.items():
+        cleaned.setdefault(company_key, [])
+
+        existing = {
+            (
+                row["sheet"].lower(),
+                row["name"].lower(),
+                row["email"].lower(),
+                row["phone"].lower(),
+            )
+            for row in cleaned[company_key]
+        }
+
+        for row in data.get("contacts", []):
+            row_key = (
+                row["sheet"].lower(),
+                row["name"].lower(),
+                row["email"].lower(),
+                row["phone"].lower(),
+            )
+
+            if row_key not in existing:
+                existing.add(row_key)
+                cleaned[company_key].append(row)
     return cleaned
 
 def hr_lookup(wb, query):
@@ -729,6 +800,89 @@ def append_call_logs(wb, entries):
 
     wb.save()
     return added
+
+def read_call_log_companies(wb, resolver=None):
+    """
+    Reads Call Logs and returns company/email/contact data found there.
+
+    Output format:
+    {
+      company_key: {
+        "display": company name,
+        "emails": [...],
+        "contacts": [
+          {
+            "sheet": "Call Logs",
+            "company": company,
+            "name": hr_name,
+            "email": hr_email,
+            "phone": phone,
+          }
+        ]
+      }
+    }
+    """
+    if CALL_LOG_SHEET not in wb.sheetnames:
+        return {}
+
+    if resolver is None:
+        resolver = CompanyResolver()
+
+    ws, cols = get_call_log_sheet(wb)
+    out = {}
+
+    for r in range(2, ws.max_row + 1):
+        company = clean(ws.cell(row=r, column=cols["Company"]).value)
+        if not company:
+            continue
+
+        phone = clean(ws.cell(row=r, column=cols["Phone Number"]).value)
+        hr_name = clean(ws.cell(row=r, column=cols["HR Name"]).value)
+        hr_email_raw = clean(ws.cell(row=r, column=cols["HR Email"]).value)
+
+        found_emails = unique_emails(emails_in(hr_email_raw))
+
+        key = resolver.key(company, found_emails)
+
+        if key not in out:
+            out[key] = {
+                "display": company,
+                "emails": [],
+                "contacts": [],
+            }
+
+        out[key]["emails"].extend(found_emails)
+
+        if phone or hr_name or found_emails:
+            out[key]["contacts"].append({
+                "sheet": "Call Logs",
+                "company": company,
+                "name": hr_name,
+                "email": ", ".join(found_emails) if found_emails else hr_email_raw,
+                "phone": phone,
+            })
+
+    for key in out:
+        out[key]["emails"] = unique_emails(out[key]["emails"])
+
+        seen = set()
+        unique_contacts = []
+
+        for c in out[key]["contacts"]:
+            ck = (
+                c["sheet"].lower(),
+                c["company"].lower(),
+                c["name"].lower(),
+                c["email"].lower(),
+                c["phone"].lower(),
+            )
+            if ck not in seen:
+                seen.add(ck)
+                unique_contacts.append(c)
+
+        out[key]["contacts"] = unique_contacts
+
+    return out
 
 def reconcile_sent(wb, pw, days=30):
     companies, _, resolver = build_company_data(wb)
