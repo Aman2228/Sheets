@@ -436,8 +436,92 @@ def hr_view():
         <input type="text" name="q" placeholder="Company name (partial ok)" value="{query}" autofocus>
         <button type="submit">Search</button>
       </form>
+      <a class="btn secondary" href="{url_for('manual_call_log_view', company=query)}">Log call for new / unlisted company</a>
       {results_html}
     </div>"""
+    return page(body)
+
+@app.route("/hr/manual", methods=["GET", "POST"])
+def manual_call_log_view():
+    company_prefill = request.values.get("company", "").strip()
+
+    if request.method == "POST":
+        company = request.form.get("company", "").strip()
+        phone_raw = request.form.get("phone", "").strip()
+        incident = request.form.get("incident", "").strip()
+        caller_name = request.form.get("caller_name", "").strip()
+        hr_name = request.form.get("hr_name", "").strip()
+        hr_email = request.form.get("hr_email", "").strip()
+
+        if not company:
+            return page(f"""
+            <div class="card">
+              <h2>Nothing logged</h2>
+              <p>Company name is required.</p>
+              <a class="btn" href="{url_for('manual_call_log_view', company=company_prefill)}">Back</a>
+            </div>
+            """)
+
+        if not phone_raw and not hr_email:
+            return page(f"""
+            <div class="card">
+              <h2>Nothing logged</h2>
+              <p>Please enter at least a phone number or HR email.</p>
+              <a class="btn" href="{url_for('manual_call_log_view', company=company)}">Back</a>
+            </div>
+            """)
+
+        wb = get_wb()
+
+        entry = {
+            "company": company,
+            "phone": phone_raw,
+            "incident": incident,
+            "date": time.strftime("%Y-%m-%d"),
+            "caller_name": caller_name,
+            "hr_name": hr_name,
+            "hr_email": hr_email,
+        }
+
+        L.append_call_logs(wb, [entry])
+
+        return page(f"""
+        <div class="card">
+          <h2>Call logged</h2>
+          <p>Logged call/contact info for {company}.</p>
+          <a class="btn" href="{url_for('hr_view', q=company)}">View company in HR lookup</a>
+          <a class="btn secondary" href="{url_for('manual_call_log_view')}">Log another new company</a>
+        </div>
+        """)
+
+    body = f"""
+    <div class="card">
+      <h2>Log call for new / unlisted company</h2>
+      <form method="post">
+        <label>Company</label>
+        <input type="text" name="company" value="{escape(company_prefill)}" placeholder="e.g. Hyundai" required>
+
+        <label>Phone Number</label>
+        <input type="text" name="phone" placeholder="e.g. +91 9876543210">
+
+        <label>Incident</label>
+        <input type="text" name="incident" placeholder="e.g. spoke to HR, asked to email brochure">
+
+        <label>Caller Name</label>
+        <input type="text" name="caller_name" placeholder="e.g. Aman">
+
+        <label>HR Name</label>
+        <input type="text" name="hr_name" placeholder="e.g. Priya Sharma">
+
+        <label>HR Email</label>
+        <input type="text" name="hr_email" placeholder="e.g. priya@company.com">
+
+        <button type="submit">Save call log</button>
+      </form>
+      <a class="btn secondary" href="{url_for('hr_view')}">Back to HR lookup</a>
+    </div>
+    """
+
     return page(body)
 
 @app.route("/hr/<key>", methods=["GET", "POST"])
