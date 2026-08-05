@@ -633,7 +633,20 @@ def debug_smtp():
     tests = [
         ("smtp.iitd.ac.in", 465),
         ("smtp.iitd.ac.in", 587),
+    
+        ("mailstore.iitd.ac.in", 465),
+        ("mailstore.iitd.ac.in", 587),
+        ("mailstore.iitd.ac.in", 25),
         ("mailstore.iitd.ac.in", 993),
+    
+        ("webmail.iitd.ac.in", 465),
+        ("webmail.iitd.ac.in", 587),
+        ("webmail.iitd.ac.in", 25),
+        ("webmail.iitd.ac.in", 443),
+    
+        ("mail.iitd.ac.in", 465),
+        ("mail.iitd.ac.in", 587),
+        ("mail.iitd.ac.in", 25),
     ]
 
     rows = ""
