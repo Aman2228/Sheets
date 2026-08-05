@@ -148,6 +148,7 @@ def dashboard():
       <a class="btn" href="{url_for('single_view')}">Single company sender</a>
       <a class="btn secondary" href="{url_for('bounces_view')}">Check bounces</a>
       <a class="btn secondary" href="{url_for('reconcile_view')}">Reconcile Sent folder</a>
+      <a class="btn secondary" href="{url_for('hr_view')}">HR contact / phone lookup</a>
     </div>
     <div class="card">
       <p class="muted">IITD mailbox password: {pw_ready}</p>
@@ -392,6 +393,101 @@ def reconcile_view():
         {password_field()}
         <button type="submit">Run</button>
       </form></div>"""
+    return page(body)
+
+# =====================================================================
+# HR CONTACT / PHONE LOOKUP  +  CALL LOGS
+# =====================================================================
+@app.route("/hr", methods=["GET"])
+@login_required
+def hr_view():
+    query = request.args.get("q", "")
+    results_html = ""
+    if query:
+        wb = get_wb()
+        matches = L.hr_lookup(wb, query)
+        if not matches:
+            results_html = '<p class="muted">No match.</p>'
+        else:
+            items = ""
+            for m in matches:
+                items += f"""<li><b>{m['display']}</b>
+                  <span class="muted">[{', '.join(m['sheets'])}] · {len(m['contacts'])} contact(s)</span><br>
+                  <a class="btn secondary" href="{url_for('hr_company_view', key=m['key'], q=query)}">View / log calls</a></li>"""
+            results_html = f'<ul class="plain">{items}</ul>'
+    body = f"""
+    <div class="card">
+      <h2>HR contact / phone lookup</h2>
+      <form method="get">
+        <input type="text" name="q" placeholder="Company name (partial ok)" value="{query}" autofocus>
+        <button type="submit">Search</button>
+      </form>
+      {results_html}
+    </div>"""
+    return page(body)
+
+@app.route("/hr/<key>", methods=["GET", "POST"])
+@login_required
+def hr_company_view(key):
+    wb = get_wb()
+    q = request.values.get("q", key)
+    matches = {m["key"]: m for m in L.hr_lookup(wb, q)}
+    m = matches.get(key)
+    if not m:
+        # direct key fallback (e.g. bookmarked link with a different query)
+        matches_all = {mm["key"]: mm for mm in L.hr_lookup(wb, key)}
+        m = matches_all.get(key)
+    if not m:
+        return redirect(url_for("hr_view"))
+
+    if request.method == "POST":
+        phone_raw = request.form.get("phone", "").strip()
+        incident = request.form.get("incident", "").strip()
+        if not phone_raw:
+            flash = "No phone entered — nothing logged."
+        else:
+            entry = {"company": m["display"], "phone": phone_raw, "incident": incident,
+                      "date": time.strftime("%Y-%m-%d")}
+            L.append_call_logs(wb, [entry])
+            flash = f"Logged call to {phone_raw} for {m['display']}."
+        return redirect(url_for("hr_company_view", key=key, q=q))
+
+    rows = "".join(
+        f"""<tr><td>{c['sheet']}</td><td>{c['name'] or '-'}</td>
+            <td>{c['phone'] or '-'}</td><td>{c['email'] or '-'}</td></tr>"""
+        for c in m["contacts"]
+    ) or '<tr><td colspan="4" class="muted">No HR name/email/phone on file.</td></tr>'
+
+    phone_options = "".join(
+        f'<option value="{c["phone"]}">{c["name"] or c["phone"]} ({c["phone"]})</option>'
+        for c in m["contacts"] if c["phone"]
+    )
+
+    body = f"""
+    <div class="card">
+      <h2>{m['display']}</h2>
+      <p class="muted">In: {', '.join(m['sheets'])}</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <tr class="muted"><th align="left">Sheet</th><th align="left">Name</th><th align="left">Phone</th><th align="left">Email</th></tr>
+        {rows}
+      </table>
+    </div>
+    <div class="card">
+      <h2>Log a call</h2>
+      <form method="post">
+        <label>Pick an existing contact's number</label>
+        <select name="phone_pick" onchange="document.getElementsByName('phone')[0].value=this.value">
+          <option value="">— or type a number below —</option>
+          {phone_options}
+        </select>
+        <label>Phone number to log</label>
+        <input type="text" name="phone" placeholder="Type or pick above">
+        <label>Incident (what happened)</label>
+        <input type="text" name="incident" placeholder="e.g. spoke to HR, follow up next week">
+        <button type="submit">Save call log</button>
+      </form>
+      <a class="btn secondary" href="{url_for('hr_view', q=q)}">Back to search</a>
+    </div>"""
     return page(body)
 
 if __name__ == "__main__":
