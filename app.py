@@ -462,20 +462,20 @@ def hr_company_view(key):
 
         if not phone_raw:
             return page(f"""<div class="card"><h2>Nothing logged</h2><p>No phone number was entered.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
+    
+        entry = {
+            "company": m["display"],
+            "phone": phone_raw,
+            "incident": incident,
+            "date": time.strftime("%Y-%m-%d"),
+            "caller_name": caller_name,
+            "hr_name": hr_name,
+            "hr_email": hr_email,
+        }
 
-    entry = {
-        "company": m["display"],
-        "phone": phone_raw,
-        "incident": incident,
-        "date": time.strftime("%Y-%m-%d"),
-        "caller_name": caller_name,
-        "hr_name": hr_name,
-        "hr_email": hr_email,
-    }
+        L.append_call_logs(wb, [entry])
 
-    L.append_call_logs(wb, [entry])
-
-    return page(f"""<div class="card"><h2>Call logged</h2><p>Logged call to {phone_raw} for {m['display']}.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
+        return page(f"""<div class="card"><h2>Call logged</h2><p>Logged call to {phone_raw} for {m['display']}.</p><a class="btn" href="{url_for('hr_company_view', key=key, q=q)}">Back</a></div>""")
 
     rows = "".join(
         f"""<tr><td>{c['sheet']}</td><td>{c['name'] or '-'}</td>
