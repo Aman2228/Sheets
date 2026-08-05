@@ -17,7 +17,7 @@ from email.mime.application import MIMEApplication
 # =====================================================================
 # CONFIG  (edit these for your setup — same values as ocs_master.py)
 # =====================================================================
-SMTP_HOST = "smtp.iitd.ac.in";  SMTP_PORT = 587
+SMTP_HOST = "smtp.iitd.ac.in";  SMTP_PORT = 993
 IMAP_HOST = "mailstore.iitd.ac.in"; IMAP_PORT = 993
 SENT_FOLDER = "Sent"
 
