@@ -98,6 +98,35 @@ def check_roundcube_login(password):
     finally:
         session.close()
 
+def roundcube_compose_session(password):
+    session = roundcube_login(WEBMAIL_USERNAME, password)
+
+    try:
+        compose_page = session.get(
+            urljoin(WEBMAIL_URL, "?_task=mail&_action=compose"),
+            timeout=TIMEOUT,
+        )
+        compose_page.raise_for_status()
+    except requests.RequestException as e:
+        session.close()
+        raise WebmailLoginError(
+            f"Could not open the Roundcube compose page: {e}"
+        ) from e
+
+    token_match = re.search(
+        r'name="_token"\s+value="([^"]+)"|'
+        r'"request_token":"([^"]+)"',
+        compose_page.text,
+    )
+    if not token_match:
+        session.close()
+        raise WebmailLoginError(
+            "Roundcube compose token was not found."
+        )
+
+    token = token_match.group(1) or token_match.group(2)
+    return session, token
+
 SENT_FOLDER = "Sent"
 
 FROM_ADDR = "met252767@mech.iitd.ac.in"
