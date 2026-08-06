@@ -640,11 +640,11 @@ def debug_webmail():
             )
 
         try:
-            L.check_roundcube_login(password)
+            roundcube_session, _ = L.roundcube_compose_session(password)
+            roundcube_session.close()
             status = '<span class="tag sent">LOGIN WORKED</span>'
             message = (
-                "Render successfully logged in to IITD Roundcube over HTTPS. "
-                "No email was sent."
+                "Render successfully logged in to IITD Roundcube and opened a compose session over HTTPS. No email was sent."
             )
         except L.WebmailLoginError as e:
             status = '<span class="tag fail">LOGIN FAILED</span>'
