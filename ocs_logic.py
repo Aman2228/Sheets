@@ -17,7 +17,9 @@ from email.mime.application import MIMEApplication
 # =====================================================================
 # CONFIG  (edit these for your setup — same values as ocs_master.py)
 # =====================================================================
-SMTP_HOST = "smtp.iitd.ac.in";  SMTP_PORT = 993
+SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.iitd.ac.in")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+
 IMAP_HOST = "mailstore.iitd.ac.in"; IMAP_PORT = 993
 SENT_FOLDER = "Sent"
 
@@ -31,8 +33,8 @@ SUBJECT_KEY = "iit delhi hiring invitation"
 
 PER_SHEET   = 3
 DELAY_SEC   = 60
-TIMEOUT     = 15
-MAX_RETRIES = 2
+TIMEOUT     = 10
+MAX_RETRIES = 1
 LOG_SHEET   = "Sent Log"
 SHEETS = ["Design", "Thermal", "Production", "Industrial"]
 
@@ -507,7 +509,7 @@ def send_continuous_batch(wb, items, pw, brochure_path, progress_cb=None, delay=
             wb.save()
             results.append({"company": company, "status": "FAILED"})
             if progress_cb: progress_cb(results[-1])
-            continue
+            break
         saved = save_to_sent(pw, raw)
         ts = log_sent(log_ws, cols, state, resolver, company, recipients)
         wb.save()
