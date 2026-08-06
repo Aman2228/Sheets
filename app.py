@@ -230,7 +230,7 @@ def continuous_view():
       <h2>Continuous sender — {len(queue)} eligible ({L.PER_SHEET} per sheet per round)</h2>
       <form method="post" action="{url_for('continuous_send')}">
         <ul class="plain">{rows}</ul>
-        <p class="muted">Brochure attachment is temporarily disabled for Roundcube sending. The email body includes the downloads link.</p>
+        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
         {password_field()}
         <button type="submit">Send selected</button>
       </form>
@@ -368,7 +368,7 @@ def single_send_view(key):
         {checks}
         <label>Extra email(s), comma-separated</label>
         <input type="text" name="custom_emails" placeholder="name@company.com">
-        <p class="muted">Brochure attachment is temporarily disabled for Roundcube sending. The email body includes the downloads link.</p>
+        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
         {password_field()}
         <button type="submit">Send</button>
       </form>
