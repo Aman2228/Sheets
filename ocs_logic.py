@@ -125,6 +125,18 @@ def roundcube_compose_session(password):
         )
 
     token = token_match.group(1) or token_match.group(2)
+
+    compose_id_match = re.search(
+        r'"compose_id":"([^"]+)"',
+        compose_page.text,
+    )
+    if not compose_id_match:
+        session.close()
+        raise WebmailLoginError(
+            "Roundcube compose ID was not found."
+        )
+
+    session.roundcube_compose_id = compose_id_match.group(1)
     return session, token
 
 SENT_FOLDER = "Sent"
