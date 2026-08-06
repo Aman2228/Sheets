@@ -147,7 +147,7 @@ def send_one_via_roundcube(
     password,
     recipients,
     company,
-    subject=SUBJECT,
+    subject=None,
     body=None,
 ):
 
@@ -160,7 +160,7 @@ def send_one_via_roundcube(
             "_cc": ", ".join(CC),
             "_bcc": ", ".join(BCC),
             "_replyto": "",
-            "_subject": subject,
+            "_subject": subject or SUBJECT,
             "_message": body if body is not None else body_for(company),
             "_is_html": "0",
             "_draft": "",
