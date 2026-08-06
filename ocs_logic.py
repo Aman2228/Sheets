@@ -101,44 +101,85 @@ def check_roundcube_login(password):
 def roundcube_compose_session(password):
     session = roundcube_login(WEBMAIL_USERNAME, password)
 
-    try:
-        compose_page = session.get(
-            urljoin(WEBMAIL_URL, "?_task=mail&_action=compose"),
-            timeout=TIMEOUT,
-        )
-        compose_page.raise_for_status()
-    except requests.RequestException as e:
-        session.close()
-        raise WebmailLoginError(
-            f"Could not open the Roundcube compose page: {e}"
-        ) from e
+    compose_url = urljoin(WEBMAIL_URL, "?_task=mail&_action=compose")
+    compose_page = session.get(compose_url, timeout=TIMEOUT)
+    compose_page.raise_for_status()
 
-    token_match = re.search(
-        r'name="_token"\s+value="([^"]+)"|'
-        r'"request_token":"([^"]+)"',
-        compose_page.text,
-    )
+    html = compose_page.text
+
+    # Extract CSRF token
+    token_match = re.search(r'name="_token"\s+value="([^"]+)"', html)
     if not token_match:
-        session.close()
-        raise WebmailLoginError(
-            "Roundcube compose token was not found."
-        )
+        token_match = re.search(r'"request_token"\s*:\s*"([^"]+)"', html)
+    if not token_match:
+        token_match = re.search(r'rcmail\.set_env$$$"request_token",\s*"([^"]+)"$$$', html)
 
-    token = token_match.group(1) or token_match.group(2)
+    if not token_match:
+        raise WebmailSendError("Could not find Roundcube CSRF token on compose page.")
 
-    compose_id_match = re.search(
-        r'"compose_id":"([^"]+)"',
-        compose_page.text,
-    )
+    token = token_match.group(1)
+
+    # Extract compose id
+    compose_id_match = re.search(r'name="_id"\s+value="([^"]+)"', html)
     if not compose_id_match:
-        session.close()
-        raise WebmailLoginError(
-            "Roundcube compose ID was not found."
+        compose_id_match = re.search(r'_id=([A-Za-z0-9]+)', html)
+
+    if compose_id_match:
+        compose_id = compose_id_match.group(1)
+    else:
+        compose_id = ""
+
+    # Extract selected sender identity.
+    # Roundcube usually uses <select name="_from"> with <option value="IDENTITY_ID" selected>.
+    identity = None
+
+    from_select_match = re.search(
+        r'<select[^>]+name="_from"[^>]*>(.*?)</select>',
+        html,
+        re.I | re.S,
+    )
+
+    if from_select_match:
+        from_select_html = from_select_match.group(1)
+
+        selected_match = re.search(
+            r'<option[^>]+value="([^"]+)"[^>]*selected',
+            from_select_html,
+            re.I | re.S,
         )
 
-    print(compose_page.text)
-    
-    session.roundcube_compose_id = compose_id_match.group(1)
+        if selected_match:
+            identity = selected_match.group(1)
+        else:
+            first_option_match = re.search(
+                r'<option[^>]+value="([^"]+)"',
+                from_select_html,
+                re.I | re.S,
+            )
+            if first_option_match:
+                identity = first_option_match.group(1)
+
+    # Some Roundcube skins use an input instead of select
+    if not identity:
+        identity_match = re.search(
+            r'name="_from"\s+value="([^"]+)"',
+            html,
+            re.I,
+        )
+        if identity_match:
+            identity = identity_match.group(1)
+
+    if not identity:
+        # Save page preview in logs so we can debug if needed.
+        print("Could not find Roundcube _from identity in compose page.", flush=True)
+        raise WebmailSendError("Could not find Roundcube sender identity on compose page.")
+
+    session.roundcube_compose_id = compose_id
+    session.roundcube_identity = identity
+
+    print(f"Roundcube compose id: {compose_id}", flush=True)
+    print(f"Roundcube sender identity: {identity}", flush=True)
+
     return session, token
 
 class WebmailSendError(Exception):
@@ -152,55 +193,105 @@ def send_one_via_roundcube(
     subject=None,
     body=None,
 ):
+    session = None
 
-    session, token = roundcube_compose_session(password)
-    
     try:
+        session, token = roundcube_compose_session(password)
+
+        subject = subject or SUBJECT
+        body = body or body_for(company)
+
+        to_field = ", ".join(recipients)
+        cc_field = ", ".join(CC)
+        bcc_field = ", ".join(BCC)
+
+        compose_id = getattr(session, "roundcube_compose_id", "")
+        identity = getattr(session, "roundcube_identity", "")
+
+        if not identity:
+            raise WebmailSendError("Roundcube sender identity is empty.")
+
+        send_url = urljoin(
+            WEBMAIL_URL,
+            f"?_task=mail&_unlock=loading&_framed=1&_action=send"
+        )
+
         payload = {
             "_token": token,
-            "_id": session.roundcube_compose_id,
-            "_from": "",
-            "_to": ", ".join(recipients),
-            "_cc": ", ".join(CC),
-            "_bcc": ", ".join(BCC),
-            "_replyto": "",
-            "_subject": subject or SUBJECT,
-            "_message": body if body is not None else body_for(company),
+            "_task": "mail",
+            "_action": "send",
+
+            # Critical fields
+            "_id": compose_id,
+            "_from": identity,
+
+            # Recipients
+            "_to": to_field,
+            "_cc": cc_field,
+            "_bcc": bcc_field,
+
+            # Message
+            "_subject": subject,
+            "_message": body,
+
+            # Common Roundcube fields
             "_is_html": "0",
-            "_draft": "",
+            "_priority": "0",
+            "_store_target": "Sent",
+            "_draft_saveid": "",
+            "_attachments": "",
+            "_references": "",
+            "_in_reply_to": "",
+            "_reply_uid": "",
+            "_forward_uid": "",
+            "_draft_uid": "",
+        }
+
+        headers = {
+            "Referer": urljoin(WEBMAIL_URL, "?_task=mail&_action=compose"),
+            "X-Roundcube-Request": token,
         }
 
         response = session.post(
-            urljoin(WEBMAIL_URL, "?_task=mail&_action=send"),
-            params={"_id": session.roundcube_compose_id},
+            send_url,
             data=payload,
+            headers=headers,
             timeout=TIMEOUT,
         )
+
         response.raise_for_status()
 
-        if "sent_successfully" not in response.text:
+        response_text = response.text or ""
+
+        if "sent_successfully" not in response_text and "Message sent successfully" not in response_text:
             message_matches = re.findall(
-                r'(?:show_message|display_message)\((.{0,500}?)\)',
-                response.text,
+                r'(?:show_message|display_message)$$$(.*?)$$$',
+                response_text,
                 re.S,
             )
-            detail = message_matches[-1] if message_matches else (
-                f"HTTP {response.status_code}; response did not contain "
-                "a Roundcube success message."
-            )
-        
-            raise WebmailSendError(
-                f"Roundcube did not confirm that the message was sent: {detail}"
-            )
+
+            if message_matches:
+                detail = message_matches[-1][:1000]
+            else:
+                detail = (
+                    f"HTTP {response.status_code}; Roundcube did not confirm send. "
+                    f"First 1000 chars: {response_text[:1000]}"
+                )
+
+            raise WebmailSendError(detail)
 
         return True
 
-    except requests.RequestException as e:
-        raise WebmailSendError(
-            f"Roundcube send request failed: {e}"
-        ) from e
+    except Exception as e:
+        print(f"Roundcube send failed: {e}", flush=True)
+        raise
+
     finally:
-        session.close()
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 SENT_FOLDER = "Sent"
 
