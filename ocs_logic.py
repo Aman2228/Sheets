@@ -136,6 +136,11 @@ def roundcube_compose_session(password):
             "Roundcube compose ID was not found."
         )
 
+
+    with open("compose.html", "w", encoding="utf-8") as f:
+        f.write(compose_page.text)
+    print("compose.html written")
+    
     session.roundcube_compose_id = compose_id_match.group(1)
     return session, token
 
