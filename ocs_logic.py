@@ -7,6 +7,8 @@ are input()/print() — every function here returns data, and app.py turns
 that into web pages.
 """
 import os, re, ssl, time, smtplib, imaplib, email, difflib
+import requests
+from urllib.parse import urljoin
 from datetime import datetime, timedelta
 from email.header import decode_header
 from email.utils import parsedate_to_datetime, formataddr, formatdate, make_msgid
@@ -21,9 +23,87 @@ SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.iitd.ac.in")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 
 IMAP_HOST = "mailstore.iitd.ac.in"; IMAP_PORT = 993
+
+WEBMAIL_URL = os.environ.get(
+    "IITD_WEBMAIL_URL",
+    "https://webmail.iitd.ac.in/roundcube/"
+)
+
+class WebmailLoginError(Exception):
+    pass
+
+
+def roundcube_login(username, password):
+    session = requests.Session()
+
+    try:
+        login_page = session.get(WEBMAIL_URL, timeout=TIMEOUT)
+        login_page.raise_for_status()
+    except requests.RequestException as e:
+        raise WebmailLoginError(f"Could not open IITD webmail: {e}") from e
+
+    token_match = re.search(
+        r'name="_token"\s+value="([^"]+)"',
+        login_page.text,
+    )
+    if not token_match:
+        raise WebmailLoginError("IITD webmail login token was not found.")
+
+    payload = {
+        "_token": token_match.group(1),
+        "_task": "login",
+        "_action": "login",
+        "_timezone": "Asia/Kolkata",
+        "_url": "",
+        "_user": username,
+        "_pass": password,
+    }
+
+    try:
+        response = session.post(
+            urljoin(WEBMAIL_URL, "?_task=login"),
+            data=payload,
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        raise WebmailLoginError(f"IITD webmail login request failed: {e}") from e
+
+    if "_task=mail" not in response.url:
+        raise WebmailLoginError(
+            "IITD webmail login was not accepted. Check the username, password, or MFA."
+        )
+
+    return session
+
+def check_roundcube_login(password):
+    session = roundcube_login(WEBMAIL_USERNAME, password)
+    try:
+        response = session.get(
+            urljoin(WEBMAIL_URL, "?_task=mail"),
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+
+        if "_task=mail" not in response.url:
+            raise WebmailLoginError(
+                "Roundcube session was not available after login."
+            )
+
+        return True
+    except requests.RequestException as e:
+        raise WebmailLoginError(
+            f"Roundcube session check failed: {e}"
+        ) from e
+    finally:
+        session.close()
+
 SENT_FOLDER = "Sent"
 
 FROM_ADDR = "met252767@mech.iitd.ac.in"
+
+WEBMAIL_USERNAME = os.environ.get("IITD_WEBMAIL_USERNAME", FROM_ADDR)
+
 FROM_NAME = "Aman Vijaypratap Prajapati"
 CC  = ["placement@admin.iitd.ac.in"]
 BCC = ["met252947@mech.iitd.ac.in", "met252592@mech.iitd.ac.in",
