@@ -172,6 +172,7 @@ def mail_dashboard():
       <a class="btn secondary" href="{url_for('bounces_view')}">Check bounces</a>
       <a class="btn secondary" href="{url_for('reconcile_view')}">Reconcile Sent folder</a>
       <a class="btn secondary" href="{url_for('debug_webmail')}">Test IITD webmail login</a>
+      <a class="btn secondary" href="{url_for('debug_webmail_send')}">Send one Roundcube test email</a>
     </div>
     <div class="card">
       <p class="muted">IITD mailbox password: {pw_ready}</p>
@@ -624,6 +625,64 @@ def hr_company_view(key):
       <a class="btn secondary" href="{url_for('hr_view', q=q)}">Back to search</a>
     </div>"""
     return page(body)
+
+@app.route("/debug-webmail-send", methods=["GET", "POST"])
+@login_required
+def debug_webmail_send():
+    if request.method == "POST":
+        password = resolve_pw(request.form)
+        recipients = L.emails_in(request.form.get("recipient", ""))
+
+        if not password or not recipients:
+            return page("""
+            <div class="card">
+              Enter your IITD mailbox password and one valid recipient email.
+              <a href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        try:
+            L.send_one_via_roundcube(
+                password=password,
+                recipients=recipients[:1],
+                company="Roundcube delivery test",
+                subject="IITD Roundcube delivery test",
+                body=(
+                    "This is a one-message delivery test from the IITD "
+                    "outreach application through IITD Roundcube webmail."
+                ),
+            )
+            status = '<span class="tag sent">TEST EMAIL SENT</span>'
+            message = f"Sent to {escape(recipients[0])}."
+        except L.WebmailSendError as e:
+            status = '<span class="tag fail">SEND FAILED</span>'
+            message = escape(str(e))
+
+        return page(f"""
+        <div class="card">
+          <h2>Roundcube test send</h2>
+          <p>{status}</p>
+          <p class="muted">{message}</p>
+          <a class="btn secondary" href="{url_for('mail_dashboard')}">
+            Back to mail dashboard
+          </a>
+        </div>
+        """)
+
+    return page(f"""
+    <div class="card">
+      <h2>Send one Roundcube test email</h2>
+      <p class="muted">
+        Use only your own IITD email address for this test.
+      </p>
+      <form method="post">
+        <label>Recipient</label>
+        <input type="text" name="recipient" placeholder="yourname@iitd.ac.in" required>
+        {password_field()}
+        <button type="submit">Send one test email</button>
+      </form>
+    </div>
+    """)
 
 @app.route("/debug-smtp")
 
