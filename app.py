@@ -647,6 +647,8 @@ def debug_smtp():
         ("mail.iitd.ac.in", 465),
         ("mail.iitd.ac.in", 587),
         ("mail.iitd.ac.in", 25),
+        ("smtp.gmail.com", 465),
+        ("smtp.gmail.com", 587),
     ]
 
     rows = ""
