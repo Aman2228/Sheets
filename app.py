@@ -633,8 +633,7 @@ def debug_smtp():
     tests = [
         ("smtp.iitd.ac.in", 465),
         ("smtp.iitd.ac.in", 587),
-        ("smtp.gmail.com", 465),
-        ("smtp.gmail.com", 587),
+        
         ("mailstore.iitd.ac.in", 465),
         ("mailstore.iitd.ac.in", 587),
         ("mailstore.iitd.ac.in", 25),
