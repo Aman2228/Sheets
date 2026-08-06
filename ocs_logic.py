@@ -185,6 +185,88 @@ def roundcube_compose_session(password):
 class WebmailSendError(Exception):
     pass
 
+def roundcube_upload_attachment(session, token, compose_id, brochure_path):
+    """
+    Upload one attachment to the current Roundcube compose session.
+    Returns the attachment token/string that Roundcube expects in _attachments.
+    """
+    if not brochure_path:
+        return ""
+
+    if not os.path.isfile(brochure_path):
+        raise WebmailSendError(f"Brochure file not found: {brochure_path}")
+
+    upload_url = urljoin(
+        WEBMAIL_URL,
+        f"?_task=mail&_action=upload&_id={compose_id}&_unlock=loading"
+    )
+
+    filename = os.path.basename(brochure_path)
+
+    headers = {
+        "X-Roundcube-Request": token,
+        "Referer": urljoin(WEBMAIL_URL, f"?_task=mail&_action=compose&_id={compose_id}"),
+    }
+
+    with open(brochure_path, "rb") as f:
+        files = {
+            "_attachments[]": (filename, f, "application/pdf"),
+        }
+
+        data = {
+            "_token": token,
+            "_id": compose_id,
+        }
+
+        response = session.post(
+            upload_url,
+            data=data,
+            files=files,
+            headers=headers,
+            timeout=TIMEOUT,
+        )
+
+    response.raise_for_status()
+
+    text = response.text or ""
+
+    print("Roundcube attachment upload response:", text[:1000], flush=True)
+
+    # Roundcube commonly returns something containing add2attachment_list(...)
+    # or an attachment id/name in JSON/script response.
+    # Try several common patterns.
+
+    # Pattern 1: "_attachments":"..."
+    m = re.search(r'"_attachments"\s*:\s*"([^"]+)"', text)
+    if m:
+        return m.group(1)
+
+    # Pattern 2: name="..."/id style from response
+    m = re.search(r'add2attachment_list$$$(.*?)$$$', text, re.S)
+    if m:
+        inside = m.group(1)
+
+        # Try to extract a token-like string from the function args.
+        candidates = re.findall(r'"([^"]+)"', inside)
+        for c in candidates:
+            if filename in c or "upload" in c.lower() or re.search(r'[a-z0-9]{8,}', c, re.I):
+                return c
+
+    # Pattern 3: look for temp filename / attachment id
+    m = re.search(r'(?:name|id|attachment)["\']?\s*[:=]\s*["\']([^"\']+)["\']', text, re.I)
+    if m:
+        return m.group(1)
+
+    # Some Roundcube versions do not need _attachments manually if upload
+    # is tied to compose_id server-side. Return empty but allow send.
+    if "error" not in text.lower() and "failed" not in text.lower():
+        print("Attachment uploaded, but no attachment token extracted. Continuing.", flush=True)
+        return ""
+
+    raise WebmailSendError(
+        "Roundcube attachment upload failed or returned an unknown response: "
+        + text[:1000]
+    )
 
 def send_one_via_roundcube(
     password,
@@ -192,6 +274,7 @@ def send_one_via_roundcube(
     company,
     subject=None,
     body=None,
+    brochure_path=None,
 ):
     session = None
 
@@ -210,6 +293,15 @@ def send_one_via_roundcube(
 
         if not identity:
             raise WebmailSendError("Roundcube sender identity is empty.")
+
+        attachment_token = ""
+        if brochure_path:
+            attachment_token = roundcube_upload_attachment(
+                session=session,
+                token=token,
+                compose_id=compose_id,
+                brochure_path=brochure_path,
+            )
 
         send_url = urljoin(
             WEBMAIL_URL,
@@ -239,7 +331,7 @@ def send_one_via_roundcube(
             "_priority": "0",
             "_store_target": "Sent",
             "_draft_saveid": "",
-            "_attachments": "",
+            "_attachments": attachment_token,
             "_references": "",
             "_in_reply_to": "",
             "_reply_uid": "",
@@ -783,6 +875,7 @@ def send_continuous_batch(wb, items, pw, brochure_path, progress_cb=None, delay=
                 company=company,
                 subject=SUBJECT,
                 body=body_for(company),
+                brochure_path=brochure_path,
             )
         except Exception as e:
             wb.save()
@@ -877,6 +970,7 @@ def send_single(wb, key, company_display, recipients, brochure_path, pw):
             company=company_display,
             subject=SUBJECT,
             body=body_for(company_display),
+            brochure_path=brochure_path,
         )
     except Exception as e:
         wb.save()
