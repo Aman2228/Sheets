@@ -151,6 +151,8 @@ def send_one_via_roundcube(
     body=None,
 ):
 
+    session, token = roundcube_compose_session(password)
+    
     try:
         payload = {
             "_token": token,
