@@ -307,7 +307,7 @@ SUBJECT     = "IIT Delhi Hiring Invitation for Internship and Placement Season 2
 SUBJECT_KEY = "iit delhi hiring invitation"
 
 PER_SHEET   = 3
-DELAY_SEC   = 60
+DELAY_SEC   = 10
 TIMEOUT     = 10
 MAX_RETRIES = 1
 LOG_SHEET   = "Sent Log"
