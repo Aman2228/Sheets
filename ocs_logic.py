@@ -177,8 +177,18 @@ def send_one_via_roundcube(
         response.raise_for_status()
 
         if "sent_successfully" not in response.text:
+            message_matches = re.findall(
+                r'(?:show_message|display_message)\((.{0,500}?)\)',
+                response.text,
+                re.S,
+            )
+            detail = message_matches[-1] if message_matches else (
+                f"HTTP {response.status_code}; response did not contain "
+                "a Roundcube success message."
+            )
+        
             raise WebmailSendError(
-                "Roundcube did not confirm that the message was sent."
+                f"Roundcube did not confirm that the message was sent: {detail}"
             )
 
         return True
