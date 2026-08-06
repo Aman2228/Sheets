@@ -765,33 +765,66 @@ def build_continuous_queue(wb):
 
 def send_continuous_batch(wb, items, pw, brochure_path, progress_cb=None, delay=DELAY_SEC):
     """items: list of {sheet, company, key, emails} selected by the user.
-    Returns list of result dicts. Saves after every send (matches original)."""
+    Returns list of result dicts. Saves after every send.
+    Uses IITD Roundcube webmail instead of SMTP because SMTP is blocked from Render.
+    """
     log_ws, cols = get_log_sheet(wb)
     _, _, resolver = build_company_data(wb)
     state = read_log_state(log_ws, cols, resolver)
     results = []
+
     for i, it in enumerate(items):
         company, recipients = it["company"], it["emails"]
-        raw = build_message(company, recipients, brochure_path)
+
         try:
-            ok = send_one(pw, recipients, raw)
-        except RateLimitHit as e:
+            ok = send_one_via_roundcube(
+                password=pw,
+                recipients=recipients,
+                company=company,
+                subject=SUBJECT,
+                body=body_for(company),
+            )
+        except Exception as e:
             wb.save()
-            results.append({"company": company, "status": "RATE_LIMIT", "detail": str(e)})
-            if progress_cb: progress_cb(results[-1])
+            results.append({
+                "company": company,
+                "status": "FAILED",
+                "detail": str(e),
+            })
+            if progress_cb:
+                progress_cb(results[-1])
             break
+
         if not ok:
             wb.save()
-            results.append({"company": company, "status": "FAILED"})
-            if progress_cb: progress_cb(results[-1])
+            results.append({
+                "company": company,
+                "status": "FAILED",
+                "detail": "Roundcube send returned False.",
+            })
+            if progress_cb:
+                progress_cb(results[-1])
             break
-        saved = save_to_sent(pw, raw)
+
+        # Roundcube normally saves sent messages itself.
+        saved = True
+
         ts = log_sent(log_ws, cols, state, resolver, company, recipients)
         wb.save()
-        results.append({"company": company, "status": "SENT", "time": ts, "saved_to_sent": saved})
-        if progress_cb: progress_cb(results[-1])
+
+        results.append({
+            "company": company,
+            "status": "SENT",
+            "time": ts,
+            "saved_to_sent": saved,
+        })
+
+        if progress_cb:
+            progress_cb(results[-1])
+
         if i < len(items) - 1:
             time.sleep(delay)
+
     return results
 
 # =====================================================================
@@ -836,20 +869,30 @@ def send_single(wb, key, company_display, recipients, brochure_path, pw):
     companies, _, resolver = build_company_data(wb)
     log_ws, cols = get_log_sheet(wb)
     state = read_log_state(log_ws, cols, resolver)
-    raw = build_message(company_display, recipients, brochure_path)
+
     try:
-        ok = send_one(pw, recipients, raw)
-    except RateLimitHit as e:
+        ok = send_one_via_roundcube(
+            password=pw,
+            recipients=recipients,
+            company=company_display,
+            subject=SUBJECT,
+            body=body_for(company_display),
+        )
+    except Exception as e:
         wb.save()
-        return {"status": "RATE_LIMIT", "detail": str(e)}
+        return {"status": "FAILED", "detail": str(e)}
+
     if not ok:
         wb.save()
-        return {"status": "FAILED"}
-    saved = save_to_sent(pw, raw)
+        return {"status": "FAILED", "detail": "Roundcube send returned False."}
+
+    # Roundcube normally saves the sent message itself.
+    saved = True
+
     ts = log_sent(log_ws, cols, state, resolver, company_display, recipients)
     wb.save()
-    return {"status": "SENT", "time": ts, "saved_to_sent": saved}
 
+    return {"status": "SENT", "time": ts, "saved_to_sent": saved}
 # =====================================================================
 # MODE 3 (logic): CHECK BOUNCES
 # =====================================================================
