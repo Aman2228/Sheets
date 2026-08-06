@@ -171,6 +171,7 @@ def mail_dashboard():
       <a class="btn" href="{url_for('single_view')}">Single company sender</a>
       <a class="btn secondary" href="{url_for('bounces_view')}">Check bounces</a>
       <a class="btn secondary" href="{url_for('reconcile_view')}">Reconcile Sent folder</a>
+      <a class="btn secondary" href="{url_for('debug_webmail')}">Test IITD webmail login</a>
     </div>
     <div class="card">
       <p class="muted">IITD mailbox password: {pw_ready}</p>
@@ -625,6 +626,54 @@ def hr_company_view(key):
     return page(body)
 
 @app.route("/debug-smtp")
+
+@app.route("/debug-webmail", methods=["GET", "POST"])
+@login_required
+def debug_webmail():
+    if request.method == "POST":
+        password = resolve_pw(request.form)
+
+        if not password:
+            return page(
+                '<div class="card">Password required. '
+                '<a href="javascript:history.back()">Back</a></div>'
+            )
+
+        try:
+            L.check_roundcube_login(password)
+            status = '<span class="tag sent">LOGIN WORKED</span>'
+            message = (
+                "Render successfully logged in to IITD Roundcube over HTTPS. "
+                "No email was sent."
+            )
+        except L.WebmailLoginError as e:
+            status = '<span class="tag fail">LOGIN FAILED</span>'
+            message = escape(str(e))
+
+        return page(f"""
+        <div class="card">
+          <h2>IITD webmail connection</h2>
+          <p>{status}</p>
+          <p class="muted">{message}</p>
+          <a class="btn secondary" href="{url_for('mail_dashboard')}">
+            Back to mail dashboard
+          </a>
+        </div>
+        """)
+
+    return page(f"""
+    <div class="card">
+      <h2>Test IITD webmail login</h2>
+      <p class="muted">
+        This only signs in through Roundcube. It does not send an email.
+      </p>
+      <form method="post">
+        {password_field()}
+        <button type="submit">Test login</button>
+      </form>
+    </div>
+    """)
+
 @login_required
 def debug_smtp():
     import socket
