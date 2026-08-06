@@ -139,6 +139,55 @@ def roundcube_compose_session(password):
     session.roundcube_compose_id = compose_id_match.group(1)
     return session, token
 
+class WebmailSendError(Exception):
+    pass
+
+
+def send_one_via_roundcube(
+    password,
+    recipients,
+    company,
+    subject=SUBJECT,
+    body=None,
+):
+
+    try:
+        payload = {
+            "_token": token,
+            "_id": session.roundcube_compose_id,
+            "_from": "",
+            "_to": ", ".join(recipients),
+            "_cc": ", ".join(CC),
+            "_bcc": ", ".join(BCC),
+            "_replyto": "",
+            "_subject": subject,
+            "_message": body if body is not None else body_for(company),
+            "_is_html": "0",
+            "_draft": "",
+        }
+
+        response = session.post(
+            urljoin(WEBMAIL_URL, "?_task=mail&_action=send"),
+            params={"_id": session.roundcube_compose_id},
+            data=payload,
+            timeout=TIMEOUT,
+        )
+        response.raise_for_status()
+
+        if "sent_successfully" not in response.text:
+            raise WebmailSendError(
+                "Roundcube did not confirm that the message was sent."
+            )
+
+        return True
+
+    except requests.RequestException as e:
+        raise WebmailSendError(
+            f"Roundcube send request failed: {e}"
+        ) from e
+    finally:
+        session.close()
+
 SENT_FOLDER = "Sent"
 
 FROM_ADDR = "met252767@mech.iitd.ac.in"
