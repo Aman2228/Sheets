@@ -230,7 +230,7 @@ def continuous_view():
       <h2>Continuous sender — {len(queue)} eligible ({L.PER_SHEET} per sheet per round)</h2>
       <form method="post" action="{url_for('continuous_send')}">
         <ul class="plain">{rows}</ul>
-        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
+        <p class="muted">Brochure attachment is temporarily disabled for Roundcube sending. The email body includes the downloads link.</p>
         {password_field()}
         <button type="submit">Send selected</button>
       </form>
@@ -270,7 +270,9 @@ def continuous_status(job_id):
     if not job:
         return redirect(url_for("continuous_view"))
     lines = "".join(
-        f"""<li>{r['company']} — <span class="tag {'sent' if r['status']=='SENT' else 'fail'}">{r['status']}</span></li>"""
+        f"""<li>{escape(r['company'])} — <span class="tag {'sent' if r['status']=='SENT' else 'fail'}">{r['status']}</span>
+            {f"<br><span class='muted'>Error: {escape(r.get('detail', ''))}</span>" if r.get('detail') else ""}
+            </li>"""
         for r in job["results"]
     )
     refresh = "" if job["done"] else '<meta http-equiv="refresh" content="3">'
@@ -346,9 +348,12 @@ def single_send_view(key):
         brochure = BROCHURE_PATH if request.form.get("brochure") else None
         result = L.send_single(wb, key, m["display"], recipients, brochure, pw)
         status = result["status"]
+        detail = result.get("detail", "")
+        
         body = f"""<div class="card"><h2>{m['display']}</h2>
           <p><span class="tag {'sent' if status=='SENT' else 'fail'}">{status}</span></p>
           <p class="muted">To: {', '.join(recipients)}</p>
+          {f'<p class="muted">Error: {escape(detail)}</p>' if detail else ''}
           <a class="btn" href="{url_for('single_view')}">Back to search</a></div>"""
         return page(body)
 
@@ -363,7 +368,7 @@ def single_send_view(key):
         {checks}
         <label>Extra email(s), comma-separated</label>
         <input type="text" name="custom_emails" placeholder="name@company.com">
-        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
+        <p class="muted">Brochure attachment is temporarily disabled for Roundcube sending. The email body includes the downloads link.</p>
         {password_field()}
         <button type="submit">Send</button>
       </form>
@@ -684,8 +689,6 @@ def debug_webmail_send():
     </div>
     """)
 
-@app.route("/debug-smtp")
-
 @app.route("/debug-webmail", methods=["GET", "POST"])
 @login_required
 def debug_webmail():
@@ -732,7 +735,8 @@ def debug_webmail():
       </form>
     </div>
     """)
-
+    
+@app.route("/debug-smtp")
 @login_required
 def debug_smtp():
     import socket
