@@ -324,8 +324,8 @@ def sheet_data_view():
         """
 
     # Call Logs section
-    if "Call Logs" in wb.sheetnames:
-        ws = wb["Call Logs"]
+    if "Call logs" in wb.sheetnames:
+        ws = wb["Call logs"]
 
         cols = {}
         wanted_headers = [
