@@ -1160,8 +1160,9 @@ CALL_LOG_FIELD_ALIASES = {
     "Incident":     ["incident", "status", "notes", "remark", "remarks"],
     "Date":         ["Date"],
     "Caller Name":  ["Caller Name"], 
+    "Success Flag": ["Success Flag"],
     "HR Name":      ["HR Name"],
-    "HR Email":     ["HR Email"]
+    "HR Email":     ["HR Email"],
 }
 
 def _header_key(v):
@@ -1222,11 +1223,15 @@ def append_call_logs(wb, entries):
     for e in entries:
         r = ws.max_row + 1
 
+        success_flag = clean(e.get("success_flag", "0"))
+        success_flag = "1" if success_flag == "1" else "0"
+        
         set_cell(ws, r, cols["Company"], e.get("company", ""))
         set_cell(ws, r, cols["Phone Number"], e.get("phone", ""))
         set_cell(ws, r, cols["Incident"], e.get("incident", ""))
         set_cell(ws, r, cols["Date"], e.get("date", ""))
         set_cell(ws, r, cols["Caller Name"], e.get("caller_name", ""))
+        set_cell(ws, r, cols["Success Flag"], success_flag)
         set_cell(ws, r, cols["HR Name"], e.get("hr_name", ""))
         set_cell(ws, r, cols["HR Email"], e.get("hr_email", ""))
 
