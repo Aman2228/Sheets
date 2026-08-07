@@ -469,6 +469,7 @@ def manual_call_log_view():
         phone_raw = request.form.get("phone", "").strip()
         incident = request.form.get("incident", "").strip()
         caller_name = request.form.get("caller_name", "").strip()
+        success_flag = "1" if request.form.get("success_flag") == "1" else "0"
         hr_name = request.form.get("hr_name", "").strip()
         hr_email = request.form.get("hr_email", "").strip()
 
@@ -498,6 +499,7 @@ def manual_call_log_view():
             "incident": incident,
             "date": time.strftime("%Y-%m-%d"),
             "caller_name": caller_name,
+            "success_flag": success_flag,
             "hr_name": hr_name,
             "hr_email": hr_email,
         }
@@ -528,6 +530,13 @@ def manual_call_log_view():
 
         <label>Caller Name</label>
         <input type="text" name="caller_name" placeholder="e.g. Aman">
+
+        
+        <label>Success Flag</label>
+        <select name="success_flag" style="width:100%;padding:11px;border:1px solid var(--line);border-radius:8px;font-size:16px;margin-top:4px">
+          <option value="0" selected>0 — Not successful / wrong number / no pickup</option>
+          <option value="1">1 — Successful / HR asked to mail</option>
+        </select>
 
         <label>HR Name</label>
         <input type="text" name="hr_name" placeholder="e.g. Priya Sharma">
@@ -560,6 +569,7 @@ def hr_company_view(key):
         phone_raw = request.form.get("phone", "").strip()
         incident = request.form.get("incident", "").strip()
         caller_name = request.form.get("caller_name", "").strip()
+        success_flag = "1" if request.form.get("success_flag") == "1" else "0"
         hr_name = request.form.get("hr_name", "").strip()
         hr_email = request.form.get("hr_email", "").strip()
 
@@ -572,6 +582,7 @@ def hr_company_view(key):
             "incident": incident,
             "date": time.strftime("%Y-%m-%d"),
             "caller_name": caller_name,
+            "success_flag": success_flag,
             "hr_name": hr_name,
             "hr_email": hr_email,
         }
@@ -618,6 +629,12 @@ def hr_company_view(key):
 
         <label>Caller Name</label>
         <input type="text" name="caller_name" placeholder="e.g. Aman">
+
+        <label>Success Flag</label>
+        <select name="success_flag" style="width:100%;padding:11px;border:1px solid var(--line);border-radius:8px;font-size:16px;margin-top:4px">
+          <option value="0" selected>0 — Not successful / wrong number / no pickup</option>
+          <option value="1">1 — Successful / HR asked to mail</option>
+        </select>
 
         <label>HR Name</label>
         <input type="text" name="hr_name" placeholder="e.g. Priya Sharma">
