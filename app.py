@@ -161,6 +161,12 @@ BASE = """
   .flash{background:#fff8e1;border:1px solid #ffe08a;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:14px}
     table th, table td{border-bottom:1px solid var(--line);padding:8px 6px;vertical-align:top}
   table th{font-weight:600}
+    details.card{padding:0}
+  details.card summary{list-style:none;cursor:pointer;padding:16px;display:flex;align-items:center;justify-content:space-between;gap:10px}
+  details.card summary::-webkit-details-marker{display:none}
+  details.card summary::after{content:"Open";font-size:12px;color:var(--accent);border:1px solid var(--accent);border-radius:999px;padding:3px 8px}
+  details.card[open] summary::after{content:"Close"}
+  details.card > div{padding:0 16px 16px}
 </style></head><body>
 <header><span>OCS Master</span>
 <a href="{{ url_for('dashboard') }}">Menu</a>
@@ -275,10 +281,15 @@ def sheet_data_view():
     for sheet_name in tabs:
         if sheet_name not in wb.sheetnames:
             cards += f"""
-            <div class="card">
-              <h2>{escape(sheet_name)}</h2>
-              <p class="muted">Sheet not found.</p>
-            </div>
+            <details class="card">
+              <summary>
+                <b>{escape(sheet_name)}</b>
+                <span class="tag fail">not found</span>
+              </summary>
+              <div style="margin-top:12px">
+                <p class="muted">Sheet not found.</p>
+              </div>
+            </details>
             """
             continue
 
@@ -317,10 +328,15 @@ def sheet_data_view():
             ])
 
         cards += f"""
-        <div class="card">
-          <h2>{escape(sheet_name)} <span class="tag">{len(rows)} row(s)</span></h2>
-          {_render_simple_table(["Company", "HR Name", "HR Phone Number", "HR Email"], rows)}
-        </div>
+        <details class="card">
+          <summary>
+            <b>{escape(sheet_name)}</b>
+            <span class="tag">{len(rows)} row(s)</span>
+          </summary>
+          <div style="margin-top:12px">
+            {_render_simple_table(["Company", "HR Name", "HR Phone Number", "HR Email"], rows)}
+          </div>
+        </details>
         """
 
     # Call Logs section
@@ -362,20 +378,30 @@ def sheet_data_view():
             call_rows.append(row)
 
         cards += f"""
-        <div class="card">
-          <h2>Call Logs <span class="tag">{len(call_rows)} row(s)</span></h2>
-          {_render_simple_table(
-              ["Company", "Phone Number", "Incident", "Date", "Caller Name", "HR Name", "HR Email", "Success Flag"],
-              call_rows
-          )}
-        </div>
+        <details class="card">
+          <summary>
+            <b>Call Logs</b>
+            <span class="tag">{len(call_rows)} row(s)</span>
+          </summary>
+          <div style="margin-top:12px">
+            {_render_simple_table(
+                ["Company", "Phone Number", "Incident", "Date", "Caller Name", "HR Name", "HR Email", "Success Flag"],
+                call_rows
+            )}
+          </div>
+        </details>
         """
     else:
         cards += """
-        <div class="card">
-          <h2>Call Logs</h2>
-          <p class="muted">Call Logs sheet not found.</p>
-        </div>
+        <details class="card">
+          <summary>
+            <b>Call Logs</b>
+            <span class="tag fail">not found</span>
+          </summary>
+          <div style="margin-top:12px">
+            <p class="muted">Call Logs sheet not found.</p>
+          </div>
+        </details>
         """
 
     return page(f"""
