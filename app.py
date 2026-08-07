@@ -74,6 +74,57 @@ def get_wb():
         raise RuntimeError("SPREADSHEET_KEY env var is not set.")
     return load_workbook(SPREADSHEET_KEY)
 
+def _sheet_col(ws, possible_headers):
+    """
+    Find a column by trying multiple possible header names.
+    Header matching is case-insensitive and ignores extra spaces.
+    """
+    wanted = {L.clean(h).lower() for h in possible_headers}
+
+    for c in range(1, ws.max_column + 1):
+        val = L.clean(ws.cell(row=1, column=c).value).lower()
+        if val in wanted:
+            return c
+
+    return None
+
+
+def _cell(ws, row, col):
+    if not col:
+        return ""
+    return L.clean(ws.cell(row=row, column=col).value)
+
+
+def _render_simple_table(headers, rows):
+    """
+    Render a mobile-friendly HTML table.
+    """
+    head_html = "".join(f"<th align='left'>{escape(h)}</th>" for h in headers)
+
+    if not rows:
+        return "<p class='muted'>No rows found.</p>"
+
+    body_html = ""
+
+    for row in rows:
+        body_html += "<tr>"
+        for value in row:
+            body_html += f"<td>{escape(str(value or ''))}</td>"
+        body_html += "</tr>"
+
+    return f"""
+    <div style="overflow-x:auto">
+      <table style="width:100%;border-collapse:collapse;font-size:14px">
+        <thead>
+          <tr class="muted">{head_html}</tr>
+        </thead>
+        <tbody>
+          {body_html}
+        </tbody>
+      </table>
+    </div>
+    """
+
 # =====================================================================
 # LAYOUT
 # =====================================================================
@@ -108,6 +159,8 @@ BASE = """
   h2{font-size:17px;margin:0 0 10px}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   .flash{background:#fff8e1;border:1px solid #ffe08a;padding:10px 12px;border-radius:8px;margin-bottom:12px;font-size:14px}
+    table th, table td{border-bottom:1px solid var(--line);padding:8px 6px;vertical-align:top}
+  table th{font-weight:600}
 </style></head><body>
 <header><span>OCS Master</span>
 <a href="{{ url_for('dashboard') }}">Menu</a>
@@ -152,6 +205,7 @@ def dashboard():
     <div class="card">
       <h2>Choose dashboard</h2>
       <a class="btn" href="{url_for('hr_view')}">HR call log / lookup</a>
+      <a class="btn secondary" href="{url_for('sheet_data_view')}">View sheet data</a>
       <a class="btn secondary" href="{url_for('mail_dashboard')}">Mail dashboard</a>
     </div>
     """)
@@ -207,6 +261,133 @@ def resolve_pw(form):
     if pw:
         set_cached_pw(pw)
     return pw
+
+# =====================================================================
+# SHEET DATA VIEWER
+# =====================================================================
+@app.route("/data")
+def sheet_data_view():
+    wb = get_wb()
+
+    tabs = ["Design", "Thermal", "Industrial", "Production"]
+    cards = ""
+
+    for sheet_name in tabs:
+        if sheet_name not in wb.sheetnames:
+            cards += f"""
+            <div class="card">
+              <h2>{escape(sheet_name)}</h2>
+              <p class="muted">Sheet not found.</p>
+            </div>
+            """
+            continue
+
+        ws = wb[sheet_name]
+
+        company_col = _sheet_col(ws, ["Company Name", "Company", "Organisation", "Organization"])
+        hr_name_col = _sheet_col(ws, ["HR Name", "Name", "Contact Person", "Contact Name"])
+        hr_phone_col = _sheet_col(ws, ["HR Phone", "HR Phone Number", "Phone Number", "Phone", "Contact Number", "Contact No."])
+        hr_email_col = _sheet_col(ws, ["HR Email", "Email", "Email ID", "Email Address", "Contact Email"])
+
+        rows = []
+        current_company = ""
+
+        for r in range(2, ws.max_row + 1):
+            company = _cell(ws, r, company_col)
+            hr_name = _cell(ws, r, hr_name_col)
+            hr_phone = _cell(ws, r, hr_phone_col)
+            hr_email = _cell(ws, r, hr_email_col)
+
+            # Many of your sheets may have company name only on the first row
+            # and HR contacts below it. This carries company downward.
+            if company:
+                current_company = company
+            else:
+                company = current_company
+
+            # Skip totally empty rows.
+            if not company and not hr_name and not hr_phone and not hr_email:
+                continue
+
+            rows.append([
+                company,
+                hr_name,
+                hr_phone,
+                hr_email,
+            ])
+
+        cards += f"""
+        <div class="card">
+          <h2>{escape(sheet_name)} <span class="tag">{len(rows)} row(s)</span></h2>
+          {_render_simple_table(["Company", "HR Name", "HR Phone Number", "HR Email"], rows)}
+        </div>
+        """
+
+    # Call Logs section
+    if "Call Logs" in wb.sheetnames:
+        ws = wb["Call Logs"]
+
+        cols = {}
+        wanted_headers = [
+            ("Company", ["Company", "Company Name"]),
+            ("Phone Number", ["Phone Number", "Phone", "HR Phone", "Contact Number"]),
+            ("Incident", ["Incident", "Status", "Notes", "Remarks"]),
+            ("Date", ["Date", "Call Date", "Timestamp", "Date/Time"]),
+            ("Caller Name", ["Caller Name", "Caller", "Called By"]),
+            ("HR Name", ["HR Name", "HRName", "Contact Person"]),
+            ("HR Email", ["HR Email", "HREmail", "Email", "Email ID"]),
+            ("Success Flag", ["Success Flag", "Success", "Successful", "Call Success"]),
+        ]
+
+        for display_name, aliases in wanted_headers:
+            cols[display_name] = _sheet_col(ws, aliases)
+
+        call_rows = []
+
+        for r in range(2, ws.max_row + 1):
+            row = [
+                _cell(ws, r, cols["Company"]),
+                _cell(ws, r, cols["Phone Number"]),
+                _cell(ws, r, cols["Incident"]),
+                _cell(ws, r, cols["Date"]),
+                _cell(ws, r, cols["Caller Name"]),
+                _cell(ws, r, cols["HR Name"]),
+                _cell(ws, r, cols["HR Email"]),
+                _cell(ws, r, cols["Success Flag"]),
+            ]
+
+            if not any(row):
+                continue
+
+            call_rows.append(row)
+
+        cards += f"""
+        <div class="card">
+          <h2>Call Logs <span class="tag">{len(call_rows)} row(s)</span></h2>
+          {_render_simple_table(
+              ["Company", "Phone Number", "Incident", "Date", "Caller Name", "HR Name", "HR Email", "Success Flag"],
+              call_rows
+          )}
+        </div>
+        """
+    else:
+        cards += """
+        <div class="card">
+          <h2>Call Logs</h2>
+          <p class="muted">Call Logs sheet not found.</p>
+        </div>
+        """
+
+    return page(f"""
+    <div class="card">
+      <h2>Sheet data viewer</h2>
+      <p class="muted">
+        Showing selected columns from Design, Thermal, Industrial, Production, and Call Logs.
+      </p>
+      <a class="btn secondary" href="{url_for('dashboard')}">Back to home</a>
+    </div>
+    {cards}
+    """)
 
 # =====================================================================
 # CONTINUOUS SENDER
