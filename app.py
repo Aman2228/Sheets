@@ -737,7 +737,7 @@ def single_new_company_view():
     """
 
     return page(body)
- @app.route("/single-public", methods=["GET", "POST"])
+@app.route("/single-public", methods=["GET", "POST"])
 @single_sender_required
 def single_public_view():
     results_html = ""
