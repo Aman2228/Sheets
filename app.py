@@ -581,7 +581,102 @@ def single_send_view(key):
       </form>
     </div>"""
     return page(body)
+@app.route("/single/new", methods=["GET", "POST"])
+@login_required
+def single_new_company_view():
+    company_prefill = request.values.get("company", "").strip()
 
+    if request.method == "POST":
+        company = request.form.get("company", "").strip()
+        custom = request.form.get("emails", "").strip()
+        recipients = L.unique_emails(L.emails_in(custom))
+
+        if not company:
+            return page("""
+            <div class="card">
+              <h2>Missing company</h2>
+              <p>Please enter the company name.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        if not recipients:
+            return page("""
+            <div class="card">
+              <h2>No valid email</h2>
+              <p>Please enter at least one valid recipient email.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        pw = resolve_pw(request.form)
+
+        if not pw:
+            return page("""
+            <div class="card">
+              <h2>Password required</h2>
+              <p>IITD mailbox password is required.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        wb = get_wb()
+        brochure = BROCHURE_PATH if request.form.get("brochure") else None
+
+        key = L.norm(company)
+
+        result = L.send_single(
+            wb=wb,
+            key=key,
+            company_display=company,
+            recipients=recipients,
+            brochure_path=brochure,
+            pw=pw,
+        )
+
+        status = result["status"]
+        detail = result.get("detail", "")
+
+        body = f"""
+        <div class="card">
+          <h2>{escape(company)}</h2>
+          <p><span class="tag {'sent' if status == 'SENT' else 'fail'}">{escape(status)}</span></p>
+          <p class="muted">To: {escape(', '.join(recipients))}</p>
+          {f'<p class="muted">Error: {escape(detail)}</p>' if detail else ''}
+          <a class="btn" href="{url_for('single_view')}">Back to single sender</a>
+          <a class="btn secondary" href="{url_for('mail_dashboard')}">Back to mail dashboard</a>
+        </div>
+        """
+
+        return page(body)
+
+    body = f"""
+    <div class="card">
+      <h2>Send to new company</h2>
+      <p class="muted">
+        Use this when the company is not present in Design, Thermal, Industrial, Production, or Call Logs.
+        The send will still be recorded in Sent Log.
+      </p>
+
+      <form method="post">
+        <label>Full company name</label>
+        <input type="text" name="company" value="{escape(company_prefill)}" placeholder="e.g. Nabhdrishti Aerospace" required>
+
+        <label>Recipient email(s)</label>
+        <input type="text" name="emails" placeholder="hr@company.com, careers@company.com" required>
+
+        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
+
+        {password_field()}
+
+        <button type="submit">Send pitch</button>
+      </form>
+
+      <a class="btn secondary" href="{url_for('single_view')}">Back to search</a>
+    </div>
+    """
+
+    return page(body)
 # =====================================================================
 # CHECK BOUNCES
 # =====================================================================
@@ -647,7 +742,12 @@ def hr_view():
         wb = get_wb()
         matches = L.hr_lookup(wb, query)
         if not matches:
-            results_html = '<p class="muted">No match.</p>'
+            results_html = f"""
+            <p class="muted">No match.</p>
+            <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
+              Send to new company
+            </a>
+            """
         else:
             items = ""
             for m in matches:
