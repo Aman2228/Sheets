@@ -26,6 +26,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "dev-key-change-me")
 SPREADSHEET_KEY = os.environ.get("SPREADSHEET_KEY")  # the long ID in the Sheet's URL
 APP_PASSWORD = os.environ.get("APP_PASSWORD")
 IITD_WEBMAIL_PASSWORD = os.environ.get("IITD_WEBMAIL_PASSWORD")
+SINGLE_SENDER_PASSWORD = os.environ.get("SINGLE_SENDER_PASSWORD")
 BROCHURE_PATH = os.environ.get("BROCHURE_FILE_PATH")  # optional, uploaded alongside app.py
 
 # ---- in-memory password cache: {session_id: (password, expires_at)} ----
@@ -68,7 +69,13 @@ def login_required(f):
             return redirect(url_for("login", next=request.path))
         return f(*a, **kw)
     return wrapper
-
+def single_sender_required(f):
+    @wraps(f)
+    def wrapper(*a, **kw):
+        if SINGLE_SENDER_PASSWORD and not session.get("single_sender_authed"):
+            return redirect(url_for("single_sender_login", next=request.path))
+        return f(*a, **kw)
+    return wrapper
 def get_wb():
     if not SPREADSHEET_KEY:
         raise RuntimeError("SPREADSHEET_KEY env var is not set.")
@@ -201,7 +208,30 @@ def login():
         <button type="submit">Enter</button>
       </form>
     </div>""", flash=err)
+@app.route("/single-login", methods=["GET", "POST"])
+def single_sender_login():
+    if not SINGLE_SENDER_PASSWORD:
+        return redirect(url_for("single_public_view"))
 
+    err = None
+
+    if request.method == "POST":
+        if request.form.get("password") == SINGLE_SENDER_PASSWORD:
+            session["single_sender_authed"] = True
+            return redirect(request.args.get("next") or url_for("single_public_view"))
+
+        err = "Wrong single sender password."
+
+    return page(f"""
+    <div class="card">
+      <h2>Single company sender access</h2>
+      <form method="post">
+        <label>Single sender password</label>
+        <input type="password" name="password" autofocus>
+        <button type="submit">Enter</button>
+      </form>
+    </div>
+    """, flash=err)
 # =====================================================================
 # DASHBOARD
 # =====================================================================
@@ -212,6 +242,7 @@ def dashboard():
       <h2>Choose dashboard</h2>
       <a class="btn" href="{url_for('hr_view')}">HR call log / lookup</a>
       <a class="btn secondary" href="{url_for('sheet_data_view')}">View sheet data</a>
+      <a class="btn secondary" href="{url_for('single_public_view')}">Single company sender</a>
       <a class="btn secondary" href="{url_for('mail_dashboard')}">Mail dashboard</a>
     </div>
     """)
@@ -702,6 +733,250 @@ def single_new_company_view():
       </form>
 
       <a class="btn secondary" href="{url_for('single_view')}">Back to search</a>
+    </div>
+    """
+
+    return page(body)
+ @app.route("/single-public", methods=["GET", "POST"])
+@single_sender_required
+def single_public_view():
+    results_html = ""
+    query = request.values.get("q", "").strip()
+
+    if query:
+        wb = get_wb()
+        matches = L.search_company(wb, query)
+
+        if not matches:
+            results_html = f"""
+            <p class="muted">No match found for "{escape(query)}".</p>
+            <a class="btn secondary" href="{url_for('single_public_new_company_view', company=query)}">
+              Send to new company
+            </a>
+            """
+        else:
+            items = ""
+
+            for m in matches:
+                tag = (
+                    f'<span class="tag {"fail" if m["already_sent"] else ""}">'
+                    f'already {m["delivery"] or "sent"}</span>'
+                ) if m["already_sent"] else ""
+
+                items += f"""
+                <li>
+                  <b>{escape(m['display'])}</b> {tag}<br>
+                  <span class="muted">{escape(', '.join(m['sheets']))}</span><br>
+                  <a class="btn secondary" href="{url_for('single_public_send_view', key=m['key'])}">
+                    Choose &amp; send
+                  </a>
+                </li>
+                """
+
+            results_html = f"""
+            <ul class="plain">{items}</ul>
+            <div class="card" style="margin-top:12px">
+              <p class="muted">Not seeing the right company in the results?</p>
+              <a class="btn secondary" href="{url_for('single_public_new_company_view', company=query)}">
+                Send to new company
+              </a>
+            </div>
+            """
+
+    body = f"""
+    <div class="card">
+      <h2>Single company sender</h2>
+      <form method="get">
+        <input type="text" name="q" placeholder="Company name (partial ok)" value="{escape(query)}" autofocus>
+        <button type="submit">Search</button>
+      </form>
+      {results_html}
+      <a class="btn secondary" href="{url_for('dashboard')}">Back to main menu</a>
+    </div>
+    """
+
+    return page(body)
+@app.route("/single-public/send/<key>", methods=["GET", "POST"])
+@single_sender_required
+def single_public_send_view(key):
+    wb = get_wb()
+    matches = {m["key"]: m for m in L.search_company(wb, key)}
+    m = matches.get(key)
+
+    if not m:
+        companies, _, _ = L.build_company_data(wb)
+        if key in companies:
+            c = companies[key]
+            m = {
+                "key": key,
+                "display": c["display"],
+                "emails": c["emails"],
+                "sheets": sorted(c["sheets"]),
+            }
+        else:
+            return redirect(url_for("single_public_view"))
+
+    if request.method == "POST":
+        chosen = request.form.getlist("email")
+        custom = [e.strip() for e in request.form.get("custom_emails", "").split(",") if e.strip()]
+        recipients = L.unique_emails(chosen + custom)
+
+        if not recipients:
+            return page("""
+            <div class="card">
+              No recipient selected.
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        pw = resolve_pw(request.form)
+
+        if not pw:
+            return page("""
+            <div class="card">
+              Password required.
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        brochure = BROCHURE_PATH if request.form.get("brochure") else None
+
+        result = L.send_single(wb, key, m["display"], recipients, brochure, pw)
+        status = result["status"]
+        detail = result.get("detail", "")
+
+        body = f"""
+        <div class="card">
+          <h2>{escape(m['display'])}</h2>
+          <p><span class="tag {'sent' if status == 'SENT' else 'fail'}">{escape(status)}</span></p>
+          <p class="muted">To: {escape(', '.join(recipients))}</p>
+          {f'<p class="muted">Error: {escape(detail)}</p>' if detail else ''}
+          <a class="btn" href="{url_for('single_public_view')}">Back to single sender</a>
+          <a class="btn secondary" href="{url_for('dashboard')}">Back to main menu</a>
+        </div>
+        """
+
+        return page(body)
+
+    checks = "".join(
+        f'<label><input type="checkbox" name="email" value="{escape(e)}" checked> {escape(e)}</label>'
+        for e in m["emails"]
+    ) or '<p class="muted">No emails on file — add one below.</p>'
+
+    body = f"""
+    <div class="card">
+      <h2>{escape(m['display'])}</h2>
+      <p class="muted">In: {escape(', '.join(m.get('sheets', [])))}</p>
+
+      <form method="post">
+        {checks}
+
+        <label>Extra email(s), comma-separated</label>
+        <input type="text" name="custom_emails" placeholder="name@company.com">
+
+        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
+
+        {password_field()}
+
+        <button type="submit">Send</button>
+      </form>
+
+      <a class="btn secondary" href="{url_for('single_public_view')}">Back to search</a>
+    </div>
+    """
+
+    return page(body)
+@app.route("/single-public/new", methods=["GET", "POST"])
+@single_sender_required
+def single_public_new_company_view():
+    company_prefill = request.values.get("company", "").strip()
+
+    if request.method == "POST":
+        company = request.form.get("company", "").strip()
+        custom = request.form.get("emails", "").strip()
+        recipients = L.unique_emails(L.emails_in(custom))
+
+        if not company:
+            return page("""
+            <div class="card">
+              <h2>Missing company</h2>
+              <p>Please enter the company name.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        if not recipients:
+            return page("""
+            <div class="card">
+              <h2>No valid email</h2>
+              <p>Please enter at least one valid recipient email.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        pw = resolve_pw(request.form)
+
+        if not pw:
+            return page("""
+            <div class="card">
+              <h2>Password required</h2>
+              <p>IITD mailbox password is required.</p>
+              <a class="btn" href="javascript:history.back()">Back</a>
+            </div>
+            """)
+
+        wb = get_wb()
+        brochure = BROCHURE_PATH if request.form.get("brochure") else None
+        key = L.norm(company)
+
+        result = L.send_single(
+            wb=wb,
+            key=key,
+            company_display=company,
+            recipients=recipients,
+            brochure_path=brochure,
+            pw=pw,
+        )
+
+        status = result["status"]
+        detail = result.get("detail", "")
+
+        body = f"""
+        <div class="card">
+          <h2>{escape(company)}</h2>
+          <p><span class="tag {'sent' if status == 'SENT' else 'fail'}">{escape(status)}</span></p>
+          <p class="muted">To: {escape(', '.join(recipients))}</p>
+          {f'<p class="muted">Error: {escape(detail)}</p>' if detail else ''}
+          <a class="btn" href="{url_for('single_public_view')}">Back to single sender</a>
+          <a class="btn secondary" href="{url_for('dashboard')}">Back to main menu</a>
+        </div>
+        """
+
+        return page(body)
+
+    body = f"""
+    <div class="card">
+      <h2>Send to new company</h2>
+      <p class="muted">
+        Use this when the company is not present in the sheet results.
+        The send will still be recorded in Sent Log.
+      </p>
+
+      <form method="post">
+        <label>Full company name</label>
+        <input type="text" name="company" value="{escape(company_prefill)}" placeholder="e.g. Nabhdrishti Aerospace" required>
+
+        <label>Recipient email(s)</label>
+        <input type="text" name="emails" placeholder="hr@company.com, careers@company.com" required>
+
+        <label><input type="checkbox" name="brochure" {"checked" if BROCHURE_PATH else ""}> Attach brochure</label>
+
+        {password_field()}
+
+        <button type="submit">Send pitch</button>
+      </form>
+
+      <a class="btn secondary" href="{url_for('single_public_view')}">Back to search</a>
     </div>
     """
 
