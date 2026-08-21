@@ -524,9 +524,13 @@ def single_view():
         <input type="text" name="q" placeholder="Company name (partial ok)" value="{query}" autofocus>
         <button type="submit">Search</button>
       </form>
+    
+      <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
+        Send to new company
+      </a>
+    
       {results_html}
     </div>"""
-    return page(body)
 
 @app.route("/single/send/<key>", methods=["GET", "POST"])
 @login_required
