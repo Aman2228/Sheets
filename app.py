@@ -341,7 +341,7 @@ def sheet_data_view():
 
     # Call Logs section
     if "Call logs" in wb.sheetnames:
-        ws = wb["Call logs"]
+        ws = wb["Call Logs"]
 
         cols = {}
         wanted_headers = [
@@ -500,37 +500,62 @@ def continuous_status(job_id):
 @login_required
 def single_view():
     results_html = ""
-    query = request.values.get("q", "")
+    query = request.values.get("q", "").strip()
+
     if query:
         wb = get_wb()
         matches = L.search_company(wb, query)
+
         if not matches:
-            results_html = '<p class="muted">No match.</p>'
+            results_html = f"""
+            <p class="muted">No match found for "{escape(query)}".</p>
+            <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
+              Send to new company
+            </a>
+            """
         else:
             items = ""
+
             for m in matches:
-                tag = f'<span class="tag {"fail" if m["already_sent"] else ""}">already {m["delivery"] or "sent"}</span>' if m["already_sent"] else ""
+                tag = (
+                    f'<span class="tag {"fail" if m["already_sent"] else ""}">'
+                    f'already {m["delivery"] or "sent"}</span>'
+                ) if m["already_sent"] else ""
+
                 items += f"""
                 <li>
-                  <b>{m['display']}</b> {tag}<br>
-                  <span class="muted">{', '.join(m['sheets'])}</span><br>
-                  <a class="btn secondary" href="{url_for('single_send_view', key=m['key'])}">Choose &amp; send</a>
-                </li>"""
-            results_html = f'<ul class="plain">{items}</ul>'
+                  <b>{escape(m['display'])}</b> {tag}<br>
+                  <span class="muted">{escape(', '.join(m['sheets']))}</span><br>
+                  <a class="btn secondary" href="{url_for('single_send_view', key=m['key'])}">
+                    Choose &amp; send
+                  </a>
+                </li>
+                """
+
+            results_html = f"""
+            <ul class="plain">{items}</ul>
+            <div class="card" style="margin-top:12px">
+              <p class="muted">
+                Not seeing the right company in the results?
+              </p>
+              <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
+                Send to new company
+              </a>
+            </div>
+            """
+
     body = f"""
     <div class="card">
       <h2>Single company sender</h2>
       <form method="get">
-        <input type="text" name="q" placeholder="Company name (partial ok)" value="{query}" autofocus>
+        <input type="text" name="q" placeholder="Company name (partial ok)" value="{escape(query)}" autofocus>
         <button type="submit">Search</button>
       </form>
-    
-      <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
-        Send to new company
-      </a>
-    
       {results_html}
-    </div>"""
+    </div>
+    """
+
+    return page(body)
 
 @app.route("/single/send/<key>", methods=["GET", "POST"])
 @login_required
@@ -748,8 +773,8 @@ def hr_view():
         if not matches:
             results_html = f"""
             <p class="muted">No match.</p>
-            <a class="btn secondary" href="{url_for('single_new_company_view', company=query)}">
-              Send to new company
+            <a class="btn secondary" href="{url_for('manual_call_log_view', company=query)}">
+              Log call for new / unlisted company
             </a>
             """
         else:
