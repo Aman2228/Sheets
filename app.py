@@ -80,6 +80,12 @@ def get_wb():
     if not SPREADSHEET_KEY:
         raise RuntimeError("SPREADSHEET_KEY env var is not set.")
     return load_workbook(SPREADSHEET_KEY)
+def get_sheet_case_insensitive(wb, wanted_name):
+    wanted = wanted_name.strip().lower()
+    for name in wb.sheetnames:
+        if name.strip().lower() == wanted:
+            return wb[name]
+    return None
 
 def _sheet_col(ws, possible_headers):
     """
@@ -310,7 +316,9 @@ def sheet_data_view():
     cards = ""
 
     for sheet_name in tabs:
-        if sheet_name not in wb.sheetnames:
+        ws = get_sheet_case_insensitive(wb, sheet_name)
+    
+        if ws is None:
             cards += f"""
             <details class="card">
               <summary>
@@ -323,8 +331,6 @@ def sheet_data_view():
             </details>
             """
             continue
-
-        ws = wb[sheet_name]
 
         company_col = _sheet_col(ws, ["Company Name", "Company", "Organisation", "Organization"])
         hr_name_col = _sheet_col(ws, ["HR Name", "Name", "Contact Person", "Contact Name"])
@@ -371,8 +377,10 @@ def sheet_data_view():
         """
 
     # Call Logs section
-    if "Call logs" in wb.sheetnames:
-        ws = wb["Call Logs"]
+    # Call Logs section
+    ws = get_sheet_case_insensitive(wb, "Call Logs")
+    
+    if ws is not None:
 
         cols = {}
         wanted_headers = [
