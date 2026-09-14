@@ -392,7 +392,7 @@ FROM_ADDR = "met252767@mech.iitd.ac.in"
 WEBMAIL_USERNAME = os.environ.get("IITD_WEBMAIL_USERNAME", FROM_ADDR)
 
 FROM_NAME = "Aman Vijaypratap Prajapati"
-CC  = ["placement@admin.iitd.ac.in"]
+CC  = ["placement@admin.iitd.ac.in", "esn252272@iitd.ac.in"]
 BCC = ["mep252764@mech.iitd.ac.in", "amanvprajapati8@gmail.com"]
 SUBJECT     = "IIT Delhi Hiring Invitation for Internship and Placement Season 2027"
 SUBJECT_KEY = "iit delhi hiring invitation"
