@@ -1,56 +1,483 @@
 """
-ocs_logic.py — the actual OCS business logic, ported from ocs_master.py.
+ocs_logic.py
+------------
+OCS business logic for the IIT Delhi recruiter-mail application.
 
-Same rules, same column layout, same resolver/aliasing, same rate-limit and
-bounce-parsing behaviour as the original CLI tool. The only things removed
-are input()/print() — every function here returns data, and app.py turns
-that into web pages.
+This module contains the business logic originally implemented in
+ocs_master.py, adapted for use by a web application.
+
+Important:
+- No input() calls.
+- No CLI interaction.
+- Functions return data/results.
+- The web layer (app.py) is responsible for rendering pages.
+- Roundcube webmail is used for sending mail.
+- IMAP is used for bounce checking and sent-folder reconciliation.
 """
-import os, re, ssl, time, smtplib, imaplib, email, difflib
-import requests
-from urllib.parse import urljoin
+
+import os
+import re
+import ssl
+import time
+import smtplib
+import imaplib
+import email
+import difflib
+import logging
 from datetime import datetime, timedelta
 from email.header import decode_header
-from email.utils import parsedate_to_datetime, formataddr, formatdate, make_msgid
+from email.utils import (
+    parsedate_to_datetime,
+    formataddr,
+    formatdate,
+    make_msgid,
+)
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+from urllib.parse import urljoin
+
+import requests
+
 
 # =====================================================================
-# CONFIG  (edit these for your setup — same values as ocs_master.py)
+# LOGGING
 # =====================================================================
+
+logger = logging.getLogger(__name__)
+
+
+# =====================================================================
+# CONFIG
+# =====================================================================
+
 SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.iitd.ac.in")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
 
-IMAP_HOST = "mailstore.iitd.ac.in"; IMAP_PORT = 993
+IMAP_HOST = os.environ.get("IMAP_HOST", "mailstore.iitd.ac.in")
+IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
 
 WEBMAIL_URL = os.environ.get(
     "IITD_WEBMAIL_URL",
-    "https://webmail.iitd.ac.in/roundcube/"
+    "https://webmail.iitd.ac.in/roundcube/",
 )
 
+SENT_FOLDER = os.environ.get("SENT_FOLDER", "Sent")
+
+FROM_ADDR = os.environ.get(
+    "FROM_ADDR",
+    "met252767@mech.iitd.ac.in",
+)
+
+WEBMAIL_USERNAME = os.environ.get(
+    "IITD_WEBMAIL_USERNAME",
+    FROM_ADDR,
+)
+
+FROM_NAME = os.environ.get(
+    "FROM_NAME",
+    "Aman Vijaypratap Prajapati",
+)
+
+CC = [
+    "placement@admin.iitd.ac.in",
+    "esn252272@iitd.ac.in",
+]
+
+BCC = [
+    "mep252764@mech.iitd.ac.in",
+    "amanvprajapati8@gmail.com",
+]
+
+SUBJECT = (
+    "IIT Delhi Hiring Invitation for Internship and Placement Season 2027"
+)
+
+SUBJECT_KEY = "iit delhi hiring invitation"
+
+PER_SHEET = 3
+DELAY_SEC = 10
+TIMEOUT = 20
+MAX_RETRIES = 1
+
+SHEETS = [
+    "Design",
+    "Thermal",
+    "Production",
+    "Industrial",
+]
+
+LOG_SHEET = "Sent Log"
+
+CALL_LOG_SHEET = "Call Logs"
+
+
+# =====================================================================
+# LINKS
+# =====================================================================
+
+PORTAL = (
+    "https://protect.checkpoint.com/v2/r05/"
+    "___https:/ocs.iitd.ac.in/portal/recruiter/auth___."
+    "YXBzMTphZGl0eWFiaXJsYW1hbmFnZW1lbnQ6YzpvOmNlZmVhYjc0NTgyZTJkNmRmZjA5ZTlkYjk3NmMwYzgwOjc6"
+    "OGNmNDo3MGRlZDJlNDBkMDYzMzYxNzgzMmFlOTAwOWJmOThhOTRjMmIzMzlmMzVhZDMwMjJhNGYyMzM0NDQ3YWVhMjY4Omg6VDpO"
+)
+
+TUTORIAL = (
+    "https://protect.checkpoint.com/v2/r05/"
+    "___https:/owncloud.iitd.ac.in/nextcloud/index.php/s/"
+    "8WAXMCBZ63zqiaP___."
+    "YXBzMTphZGl0eWFiaXJsYW1hbmFnZW1lbnQ6YzpvOmNlZmVhYjc0NTgyZTJkNmRmZjA5ZTlkYjk3"
+    "NmMwYzgwOjc6ZDZmMjoyZWNhYWYyNjhlMGEyMDUwODA5MDkxMWU2Y2E2MjUzMzlmM2FkZjM1NTEw"
+    "M2NhNWQwMmFlYjM4ODcxOTYwZmIzOmg6VDpO"
+)
+
+DOWNLOADS = "https://ocs.iitd.ac.in/downloads"
+
+
+# =====================================================================
+# EXCEPTIONS
+# =====================================================================
+
 class WebmailLoginError(Exception):
-    pass
+    """Raised when Roundcube login fails."""
+
+
+class WebmailSendError(Exception):
+    """Raised when Roundcube cannot send a message."""
+
+
+class RateLimitHit(Exception):
+    """Raised when SMTP reports a rate limit."""
+
+
+# =====================================================================
+# GENERAL HELPERS
+# =====================================================================
+
+def clean(value):
+    """Convert a value to clean string form."""
+    if value is None:
+        return ""
+
+    return str(value).replace("\xa0", " ").strip()
+
+
+def set_cell(ws, row, column, value):
+    """Safely write a workbook cell."""
+    ws.cell(row=row, column=column).value = value
+
+
+def norm(value):
+    """
+    Normalize company names for comparison.
+
+    Aliases intentionally mirror the original resolver.
+    """
+    value = clean(value).lower()
+
+    value = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        value,
+    ).strip()
+
+    aliases = {
+        "airbus india": "airbus",
+        "airbus": "airbus",
+
+        "boeing india": "boeing",
+        "boeing": "boeing",
+        "boeing india defence": "boeing",
+
+        "ge aerospace": "ge aerospace",
+
+        "rolls royce": "rolls royce",
+
+        "pratt whitney": "pratt whitney",
+
+        "collins aerospace": "collins aerospace",
+
+        "cummins india": "cummins",
+        "cummins": "cummins",
+
+        "mahindra mahindra": "mahindra",
+        "mahindra": "mahindra",
+
+        "tata motors": "tata motors",
+        "tata steel": "tata steel",
+
+        "hyundai motor india": "hyundai",
+        "hyundai": "hyundai",
+
+        "alstom india": "alstom",
+        "alstom": "alstom",
+
+        "bajaj auto": "bajaj auto",
+
+        "dassault systemes": "dassault",
+        "dassault syst mes": "dassault",
+        "dassault": "dassault",
+
+        "siemens energy": "siemens energy",
+
+        "ge vernova": "ge vernova",
+
+        "jsw energy": "jsw energy",
+
+        "bellatrix aerospace": "bellatrix",
+
+        "reliance new energy": "reliance new energy",
+
+        "valeo": "valeo",
+
+        "bosch india": "bosch",
+        "bosch": "bosch",
+
+        "mtar technologies": "mtar",
+
+        "mercedes benz r d india mbrdi": "mercedes",
+        "mercedes benz r d": "mercedes",
+        "mercedes benz r d india": "mercedes",
+        "mercedes": "mercedes",
+
+        "honeywell aerospace": "honeywell",
+        "honeywell": "honeywell",
+
+        "tata advanced systems": "tasl",
+        "tasl": "tasl",
+
+        "larsen toubro": "l t",
+        "l t": "l t",
+    }
+
+    return aliases.get(value, value)
+
+
+EMAIL_RE = re.compile(
+    r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}",
+)
+
+
+def emails_in(value):
+    """Return email addresses found inside arbitrary text."""
+    return EMAIL_RE.findall(clean(value))
+
+
+def unique_emails(emails):
+    """Deduplicate email addresses while preserving order."""
+    result = []
+    seen = set()
+
+    for email_addr in emails or []:
+        email_addr = clean(email_addr)
+
+        if not email_addr:
+            continue
+
+        if email_addr.lower() == "have to find":
+            continue
+
+        key = email_addr.lower()
+
+        if key not in seen:
+            seen.add(key)
+            result.append(email_addr)
+
+    return result
+
+
+def detect_col(ws, header):
+    """Find a column by header name."""
+    target = clean(header).lower()
+
+    for column in range(1, ws.max_column + 1):
+        value = clean(
+            ws.cell(row=1, column=column).value
+        ).lower()
+
+        if value == target:
+            return column
+
+    return None
+
+
+# =====================================================================
+# COMPANY RESOLVER
+# =====================================================================
+
+FREE_DOMAINS = {
+    "gmail",
+    "yahoo",
+    "hotmail",
+    "outlook",
+    "rediffmail",
+    "live",
+    "icloud",
+    "protonmail",
+    "163",
+    "ymail",
+}
+
+
+def _domain_root(email_addr):
+    """
+    Extract the first domain component.
+
+    Example:
+        hr@airbus.com -> airbus
+        hr@airbus.co.in -> airbus
+    """
+    try:
+        domain = email_addr.split("@", 1)[1].lower()
+        root = domain.split(".", 1)[0]
+
+        if root in FREE_DOMAINS:
+            return None
+
+        return root
+
+    except (IndexError, AttributeError):
+        return None
+
+
+class CompanyResolver:
+    """
+    Resolves companies using both normalized names and email domains.
+    """
+
+    def __init__(self):
+        self.domain_to_key = {}
+        self.name_to_key = {}
+
+    def key(self, name, emails):
+        nkey = norm(name)
+
+        roots = {
+            root
+            for root in (
+                _domain_root(e)
+                for e in (emails or [])
+            )
+            if root
+        }
+
+        # Existing domain match wins.
+        for root in roots:
+            if root in self.domain_to_key:
+                key = self.domain_to_key[root]
+
+                self.name_to_key[nkey] = key
+
+                for root2 in roots:
+                    self.domain_to_key.setdefault(root2, key)
+
+                return key
+
+        # Existing name match.
+        key = self.name_to_key.get(nkey, nkey)
+
+        self.name_to_key[nkey] = key
+
+        for root in roots:
+            self.domain_to_key.setdefault(root, key)
+
+        return key
+
+    def key_for_name_only(self, name):
+        normalized = norm(name)
+        return self.name_to_key.get(
+            normalized,
+            normalized,
+        )
+
+    def key_for_emails(self, emails):
+        for email_addr in emails or []:
+            root = _domain_root(email_addr)
+
+            if root and root in self.domain_to_key:
+                return self.domain_to_key[root]
+
+        return None
+
+
+# =====================================================================
+# ROUNDCUBE LOGIN
+# =====================================================================
+
+def _extract_roundcube_token(html):
+    """
+    Extract CSRF/request token from several Roundcube variants.
+    """
+
+    patterns = [
+        r'name=["\']_token["\']\s+value=["\']([^"\']+)["\']',
+        r'name=["\']_token["\'][^>]+value=["\']([^"\']+)["\']',
+        r'"request_token"\s*:\s*"([^"]+)"',
+        r'rcmail\.set_env\(\s*["\']request_token["\']\s*,\s*["\']([^"\']+)["\']',
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            html or "",
+            re.I | re.S,
+        )
+
+        if match:
+            return match.group(1)
+
+    return None
 
 
 def roundcube_login(username, password):
+    """
+    Log into IIT Delhi Roundcube.
+
+    Returns:
+        requests.Session
+    """
+
+    if not username:
+        raise WebmailLoginError(
+            "Roundcube username is empty."
+        )
+
+    if not password:
+        raise WebmailLoginError(
+            "Roundcube password is empty."
+        )
+
     session = requests.Session()
 
     try:
-        login_page = session.get(WEBMAIL_URL, timeout=TIMEOUT)
-        login_page.raise_for_status()
-    except requests.RequestException as e:
-        raise WebmailLoginError(f"Could not open IITD webmail: {e}") from e
+        login_page = session.get(
+            WEBMAIL_URL,
+            timeout=TIMEOUT,
+        )
 
-    token_match = re.search(
-        r'name="_token"\s+value="([^"]+)"',
-        login_page.text,
+        login_page.raise_for_status()
+
+    except requests.RequestException as exc:
+        session.close()
+
+        raise WebmailLoginError(
+            f"Could not open IITD webmail: {exc}"
+        ) from exc
+
+    token = _extract_roundcube_token(
+        login_page.text
     )
-    if not token_match:
-        raise WebmailLoginError("IITD webmail login token was not found.")
+
+    if not token:
+        session.close()
+
+        raise WebmailLoginError(
+            "IITD webmail login token was not found."
+        )
 
     payload = {
-        "_token": token_match.group(1),
+        "_token": token,
         "_task": "login",
         "_action": "login",
         "_timezone": "Asia/Kolkata",
@@ -61,28 +488,56 @@ def roundcube_login(username, password):
 
     try:
         response = session.post(
-            urljoin(WEBMAIL_URL, "?_task=login"),
+            urljoin(
+                WEBMAIL_URL,
+                "?_task=login",
+            ),
             data=payload,
             timeout=TIMEOUT,
+            allow_redirects=True,
         )
-        response.raise_for_status()
-    except requests.RequestException as e:
-        raise WebmailLoginError(f"IITD webmail login request failed: {e}") from e
 
-    if "_task=mail" not in response.url:
+        response.raise_for_status()
+
+    except requests.RequestException as exc:
+        session.close()
+
         raise WebmailLoginError(
-            "IITD webmail login was not accepted. Check the username, password, or MFA."
+            f"IITD webmail login request failed: {exc}"
+        ) from exc
+
+    final_url = response.url or ""
+
+    if "_task=mail" not in final_url:
+        session.close()
+
+        raise WebmailLoginError(
+            "IITD webmail login was not accepted. "
+            "Check the username, password, or MFA."
         )
 
     return session
 
+
 def check_roundcube_login(password):
-    session = roundcube_login(WEBMAIL_USERNAME, password)
+    """
+    Validate Roundcube credentials.
+    """
+
+    session = roundcube_login(
+        WEBMAIL_USERNAME,
+        password,
+    )
+
     try:
         response = session.get(
-            urljoin(WEBMAIL_URL, "?_task=mail"),
+            urljoin(
+                WEBMAIL_URL,
+                "?_task=mail",
+            ),
             timeout=TIMEOUT,
         )
+
         response.raise_for_status()
 
         if "_task=mail" not in response.url:
@@ -91,561 +546,348 @@ def check_roundcube_login(password):
             )
 
         return True
-    except requests.RequestException as e:
+
+    except requests.RequestException as exc:
         raise WebmailLoginError(
-            f"Roundcube session check failed: {e}"
-        ) from e
+            f"Roundcube session check failed: {exc}"
+        ) from exc
+
     finally:
         session.close()
 
-def roundcube_compose_session(password):
-    session = roundcube_login(WEBMAIL_USERNAME, password)
 
-    compose_url = urljoin(WEBMAIL_URL, "?_task=mail&_action=compose")
-    compose_page = session.get(compose_url, timeout=TIMEOUT)
-    compose_page.raise_for_status()
+# =====================================================================
+# ROUNDCUBE COMPOSE
+# =====================================================================
 
-    html = compose_page.text
+def _extract_compose_id(html):
+    patterns = [
+        r'name=["\']_id["\']\s+value=["\']([^"\']*)["\']',
+        r'name=["\']_id["\'][^>]+value=["\']([^"\']*)["\']',
+        r'["_\']id["\']\s*[:=]\s*["\']([^"\']+)["\']',
+        r'_id=([A-Za-z0-9_-]+)',
+    ]
 
-    # Extract CSRF token
-    token_match = re.search(r'name="_token"\s+value="([^"]+)"', html)
-    if not token_match:
-        token_match = re.search(r'"request_token"\s*:\s*"([^"]+)"', html)
-    if not token_match:
-        token_match = re.search(r'rcmail\.set_env$$$"request_token",\s*"([^"]+)"$$$', html)
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            html or "",
+            re.I | re.S,
+        )
 
-    if not token_match:
-        raise WebmailSendError("Could not find Roundcube CSRF token on compose page.")
+        if match:
+            return match.group(1)
 
-    token = token_match.group(1)
+    return ""
 
-    # Extract compose id
-    compose_id_match = re.search(r'name="_id"\s+value="([^"]+)"', html)
-    if not compose_id_match:
-        compose_id_match = re.search(r'_id=([A-Za-z0-9]+)', html)
 
-    if compose_id_match:
-        compose_id = compose_id_match.group(1)
-    else:
-        compose_id = ""
+def _extract_roundcube_identity(html):
+    """
+    Extract sender identity from the compose page.
+    """
 
-    # Extract selected sender identity.
-    # Roundcube usually uses <select name="_from"> with <option value="IDENTITY_ID" selected>.
-    identity = None
-
-    from_select_match = re.search(
-        r'<select[^>]+name="_from"[^>]*>(.*?)</select>',
-        html,
+    # Preferred form: select[name="_from"]
+    select_match = re.search(
+        r'<select[^>]+name=["\']_from["\'][^>]*>'
+        r'(.*?)'
+        r'</select>',
+        html or "",
         re.I | re.S,
     )
 
-    if from_select_match:
-        from_select_html = from_select_match.group(1)
+    if select_match:
+        select_html = select_match.group(1)
 
+        # Selected option.
         selected_match = re.search(
-            r'<option[^>]+value="([^"]+)"[^>]*selected',
-            from_select_html,
+            r'<option[^>]+value=["\']([^"\']+)["\'][^>]*'
+            r'\bselected\b',
+            select_html,
             re.I | re.S,
         )
 
         if selected_match:
-            identity = selected_match.group(1)
-        else:
-            first_option_match = re.search(
-                r'<option[^>]+value="([^"]+)"',
-                from_select_html,
-                re.I | re.S,
-            )
-            if first_option_match:
-                identity = first_option_match.group(1)
+            return selected_match.group(1)
 
-    # Some Roundcube skins use an input instead of select
-    if not identity:
-        identity_match = re.search(
-            r'name="_from"\s+value="([^"]+)"',
-            html,
-            re.I,
+        # Sometimes selected appears before value.
+        selected_match = re.search(
+            r'<option[^>]*\bselected\b[^>]+'
+            r'value=["\']([^"\']+)["\']',
+            select_html,
+            re.I | re.S,
         )
-        if identity_match:
-            identity = identity_match.group(1)
 
-    if not identity:
-        # Save page preview in logs so we can debug if needed.
-        print("Could not find Roundcube _from identity in compose page.", flush=True)
-        raise WebmailSendError("Could not find Roundcube sender identity on compose page.")
+        if selected_match:
+            return selected_match.group(1)
 
-    session.roundcube_compose_id = compose_id
-    session.roundcube_identity = identity
+        # Fall back to first option.
+        first_match = re.search(
+            r'<option[^>]+value=["\']([^"\']+)["\']',
+            select_html,
+            re.I | re.S,
+        )
 
-    print(f"Roundcube compose id: {compose_id}", flush=True)
-    print(f"Roundcube sender identity: {identity}", flush=True)
+        if first_match:
+            return first_match.group(1)
 
-    return session, token
+    # Input variant.
+    input_patterns = [
+        r'name=["\']_from["\']\s+value=["\']([^"\']+)["\']',
+        r'name=["\']_from["\'][^>]+value=["\']([^"\']+)["\']',
+        r'value=["\']([^"\']+)["\'][^>]+name=["\']_from["\']',
+    ]
 
-class WebmailSendError(Exception):
-    pass
+    for pattern in input_patterns:
+        match = re.search(
+            pattern,
+            html or "",
+            re.I | re.S,
+        )
 
-def roundcube_upload_attachment(session, token, compose_id, brochure_path):
+        if match:
+            return match.group(1)
+
+    return ""
+
+
+def roundcube_compose_session(password):
     """
-    Upload one attachment to the current Roundcube compose session.
-    Returns the attachment token/string that Roundcube expects in _attachments.
+    Login and open a Roundcube compose session.
+
+    Returns:
+        (session, token)
     """
+
+    session = roundcube_login(
+        WEBMAIL_USERNAME,
+        password,
+    )
+
+    try:
+        compose_url = urljoin(
+            WEBMAIL_URL,
+            "?_task=mail&_action=compose",
+        )
+
+        compose_page = session.get(
+            compose_url,
+            timeout=TIMEOUT,
+        )
+
+        compose_page.raise_for_status()
+
+        html = compose_page.text or ""
+
+        token = _extract_roundcube_token(html)
+
+        if not token:
+            raise WebmailSendError(
+                "Could not find Roundcube CSRF token on compose page."
+            )
+
+        compose_id = _extract_compose_id(html)
+
+        identity = _extract_roundcube_identity(html)
+
+        if not identity:
+            raise WebmailSendError(
+                "Could not find Roundcube sender identity "
+                "on compose page."
+            )
+
+        session.roundcube_compose_id = compose_id
+        session.roundcube_identity = identity
+
+        logger.info(
+            "Roundcube compose session created: id=%s",
+            compose_id,
+        )
+
+        return session, token
+
+    except Exception:
+        session.close()
+        raise
+
+
+# =====================================================================
+# ROUNDCUBE ATTACHMENT
+# =====================================================================
+
+def _extract_attachment_token(text, filename):
+    """
+    Try to extract an attachment identifier from a Roundcube upload
+    response.
+    """
+
+    text = text or ""
+
+    patterns = [
+        r'"_attachments"\s*:\s*"([^"]+)"',
+        r'"attachment"\s*:\s*"([^"]+)"',
+        r'"id"\s*:\s*"([^"]+)"',
+        r'"name"\s*:\s*"([^"]+)"',
+    ]
+
+    for pattern in patterns:
+        match = re.search(
+            pattern,
+            text,
+            re.I | re.S,
+        )
+
+        if match:
+            value = match.group(1)
+
+            if value:
+                return value
+
+    # Roundcube JavaScript callback.
+    callback_match = re.search(
+        r'add2attachment_list\((.*?)\)',
+        text,
+        re.I | re.S,
+    )
+
+    if callback_match:
+        inside = callback_match.group(1)
+
+        quoted = re.findall(
+            r'["\']([^"\']+)["\']',
+            inside,
+        )
+
+        # Prefer anything containing the filename.
+        for candidate in quoted:
+            if filename.lower() in candidate.lower():
+                return candidate
+
+        # Otherwise prefer longer token-like values.
+        for candidate in quoted:
+            if re.search(
+                r"[A-Za-z0-9_-]{8,}",
+                candidate,
+            ):
+                return candidate
+
+    return ""
+
+
+def roundcube_upload_attachment(
+    session,
+    token,
+    compose_id,
+    brochure_path,
+):
+    """
+    Upload an attachment to the current compose session.
+
+    Returns:
+        attachment token or empty string.
+    """
+
     if not brochure_path:
         return ""
 
     if not os.path.isfile(brochure_path):
-        raise WebmailSendError(f"Brochure file not found: {brochure_path}")
+        raise WebmailSendError(
+            f"Brochure file not found: {brochure_path}"
+        )
+
+    filename = os.path.basename(
+        brochure_path
+    )
 
     upload_url = urljoin(
         WEBMAIL_URL,
-        f"?_task=mail&_action=upload&_id={compose_id}&_unlock=loading"
+        (
+            "?_task=mail"
+            "&_action=upload"
+            f"&_id={compose_id}"
+            "&_unlock=loading"
+        ),
     )
-
-    filename = os.path.basename(brochure_path)
 
     headers = {
         "X-Roundcube-Request": token,
-        "Referer": urljoin(WEBMAIL_URL, f"?_task=mail&_action=compose&_id={compose_id}"),
+        "Referer": urljoin(
+            WEBMAIL_URL,
+            (
+                "?_task=mail"
+                "&_action=compose"
+                f"&_id={compose_id}"
+            ),
+        ),
     }
 
-    with open(brochure_path, "rb") as f:
-        files = {
-            "_attachments[]": (filename, f, "application/pdf"),
-        }
-
-        data = {
-            "_token": token,
-            "_id": compose_id,
-        }
-
-        response = session.post(
-            upload_url,
-            data=data,
-            files=files,
-            headers=headers,
-            timeout=TIMEOUT,
-        )
-
-    response.raise_for_status()
-
-    text = response.text or ""
-
-    print("Roundcube attachment upload response:", text[:1000], flush=True)
-
-    # Roundcube commonly returns something containing add2attachment_list(...)
-    # or an attachment id/name in JSON/script response.
-    # Try several common patterns.
-
-    # Pattern 1: "_attachments":"..."
-    m = re.search(r'"_attachments"\s*:\s*"([^"]+)"', text)
-    if m:
-        return m.group(1)
-
-    # Pattern 2: name="..."/id style from response
-    m = re.search(r'add2attachment_list$$$(.*?)$$$', text, re.S)
-    if m:
-        inside = m.group(1)
-
-        # Try to extract a token-like string from the function args.
-        candidates = re.findall(r'"([^"]+)"', inside)
-        for c in candidates:
-            if filename in c or "upload" in c.lower() or re.search(r'[a-z0-9]{8,}', c, re.I):
-                return c
-
-    # Pattern 3: look for temp filename / attachment id
-    m = re.search(r'(?:name|id|attachment)["\']?\s*[:=]\s*["\']([^"\']+)["\']', text, re.I)
-    if m:
-        return m.group(1)
-
-    # Some Roundcube versions do not need _attachments manually if upload
-    # is tied to compose_id server-side. Return empty but allow send.
-    if "error" not in text.lower() and "failed" not in text.lower():
-        print("Attachment uploaded, but no attachment token extracted. Continuing.", flush=True)
-        return ""
-
-    raise WebmailSendError(
-        "Roundcube attachment upload failed or returned an unknown response: "
-        + text[:1000]
-    )
-
-def send_one_via_roundcube(
-    password,
-    recipients,
-    company,
-    subject=None,
-    body=None,
-    brochure_path=None,
-):
-    session = None
-
     try:
-        session, token = roundcube_compose_session(password)
+        with open(
+            brochure_path,
+            "rb",
+        ) as file_obj:
 
-        subject = subject or SUBJECT
-        body = body or body_for(company)
+            files = {
+                "_attachments[]": (
+                    filename,
+                    file_obj,
+                    "application/pdf",
+                ),
+            }
 
-        to_field = ", ".join(recipients)
-        cc_field = ", ".join(CC)
-        bcc_field = ", ".join(BCC)
+            data = {
+                "_token": token,
+                "_id": compose_id,
+            }
 
-        compose_id = getattr(session, "roundcube_compose_id", "")
-        identity = getattr(session, "roundcube_identity", "")
-
-        if not identity:
-            raise WebmailSendError("Roundcube sender identity is empty.")
-
-        attachment_token = ""
-        if brochure_path:
-            attachment_token = roundcube_upload_attachment(
-                session=session,
-                token=token,
-                compose_id=compose_id,
-                brochure_path=brochure_path,
+            response = session.post(
+                upload_url,
+                data=data,
+                files=files,
+                headers=headers,
+                timeout=TIMEOUT,
             )
-
-        send_url = urljoin(
-            WEBMAIL_URL,
-            f"?_task=mail&_unlock=loading&_framed=1&_action=send"
-        )
-
-        payload = {
-            "_token": token,
-            "_task": "mail",
-            "_action": "send",
-
-            # Critical fields
-            "_id": compose_id,
-            "_from": identity,
-
-            # Recipients
-            "_to": to_field,
-            "_cc": cc_field,
-            "_bcc": bcc_field,
-
-            # Message
-            "_subject": subject,
-            "_message": body,
-
-            # Common Roundcube fields
-            "_is_html": "0",
-            "_priority": "0",
-            "_store_target": "Sent",
-            "_draft_saveid": "",
-            "_attachments": attachment_token,
-            "_references": "",
-            "_in_reply_to": "",
-            "_reply_uid": "",
-            "_forward_uid": "",
-            "_draft_uid": "",
-        }
-
-        headers = {
-            "Referer": urljoin(WEBMAIL_URL, "?_task=mail&_action=compose"),
-            "X-Roundcube-Request": token,
-        }
-
-        response = session.post(
-            send_url,
-            data=payload,
-            headers=headers,
-            timeout=TIMEOUT,
-        )
 
         response.raise_for_status()
 
-        response_text = response.text or ""
+    except (OSError, requests.RequestException) as exc:
+        raise WebmailSendError(
+            f"Roundcube attachment upload failed: {exc}"
+        ) from exc
 
-        if "sent_successfully" not in response_text and "Message sent successfully" not in response_text:
-            message_matches = re.findall(
-                r'(?:show_message|display_message)$$$(.*?)$$$',
-                response_text,
-                re.S,
-            )
+    response_text = response.text or ""
 
-            if message_matches:
-                detail = message_matches[-1][:1000]
-            else:
-                detail = (
-                    f"HTTP {response.status_code}; Roundcube did not confirm send. "
-                    f"First 1000 chars: {response_text[:1000]}"
-                )
+    token_value = _extract_attachment_token(
+        response_text,
+        filename,
+    )
 
-            raise WebmailSendError(detail)
+    if token_value:
+        return token_value
 
-        return True
+    # Some Roundcube installations attach the uploaded file to the
+    # compose session server-side.
+    lower_text = response_text.lower()
 
-    except Exception as e:
-        print(f"Roundcube send failed: {e}", flush=True)
-        raise
+    if (
+        "error" not in lower_text
+        and "failed" not in lower_text
+    ):
+        logger.warning(
+            "Attachment uploaded but no explicit "
+            "attachment token was found."
+        )
+        return ""
 
-    finally:
-        if session is not None:
-            try:
-                session.close()
-            except Exception:
-                pass
+    raise WebmailSendError(
+        "Roundcube attachment upload returned an "
+        f"unexpected response: {response_text[:1000]}"
+    )
 
-SENT_FOLDER = "Sent"
-
-FROM_ADDR = "met252767@mech.iitd.ac.in"
-
-WEBMAIL_USERNAME = os.environ.get("IITD_WEBMAIL_USERNAME", FROM_ADDR)
-
-FROM_NAME = "Aman Vijaypratap Prajapati"
-CC  = ["placement@admin.iitd.ac.in", "esn252272@iitd.ac.in"]
-BCC = ["mep252764@mech.iitd.ac.in", "amanvprajapati8@gmail.com"]
-SUBJECT     = "IIT Delhi Hiring Invitation for Internship and Placement Season 2027"
-SUBJECT_KEY = "iit delhi hiring invitation"
-
-PER_SHEET   = 3
-DELAY_SEC   = 10
-TIMEOUT     = 10
-MAX_RETRIES = 1
-LOG_SHEET   = "Sent Log"
-SHEETS = ["Design", "Thermal", "Production", "Industrial"]
-
-PORTAL = ("https://protect.checkpoint.com/v2/r05/___https:/ocs.iitd.ac.in/portal/recruiter/auth___."
-          "YXBzMTphZGl0eWFiaXJsYW1hbmFnZW1lbnQ6YzpvOmNlZmVhYjc0NTgyZTJkNmRmZjA5ZTlkYjk3NmMwYzgwOjc6"
-          "OGNmNDo3MGRlZDJlNDBkMDYzMzYxNzgzMmFlOTAwOWJmOThhOTRjMmIzMzlmMzVhZDMwMjJhNGYyMzM0NDQ3YWVhMjY4Omg6VDpO")
-TUTORIAL = ("https://protect.checkpoint.com/v2/r05/___https:/owncloud.iitd.ac.in/nextcloud/index.php/s/"
-            "8WAXMCBZ63zqiaP___.YXBzMTphZGl0eWFiaXJsYW1hbmFnZW1lbnQ6YzpvOmNlZmVhYjc0NTgyZTJkNmRmZjA5ZTlkYjk3"
-            "NmMwYzgwOjc6ZDZmMjoyZWNhYWYyNjhlMGEyMDUwODA5MDkxMWU2Y2E2MjUzMzlmM2FkZjM1NTEwM2NhNWQwMmFlYjM4ODcxOTYwZmIzOmg6VDpO")
-DOWNLOADS = "https://ocs.iitd.ac.in/downloads"
 
 # =====================================================================
-# SMALL HELPERS  (unchanged from ocs_master.py)
+# EMAIL BODY
 # =====================================================================
-def clean(v): return "" if v is None else str(v).replace("\xa0", " ").strip()
-def set_cell(ws, row, column, value):
-    ws.cell(row=row, column=column).value = value
 
-def norm(value):
-    value = clean(value).lower()
-    value = re.sub(r"[^a-z0-9]+", " ", value).strip()
-    aliases = {
-        "airbus india":"airbus","airbus":"airbus","boeing india":"boeing","boeing":"boeing",
-        "boeing india defence":"boeing","ge aerospace":"ge aerospace","rolls royce":"rolls royce",
-        "pratt whitney":"pratt whitney","collins aerospace":"collins aerospace","cummins india":"cummins",
-        "cummins":"cummins","mahindra mahindra":"mahindra","mahindra":"mahindra","tata motors":"tata motors",
-        "tata steel":"tata steel","hyundai motor india":"hyundai","hyundai":"hyundai","alstom india":"alstom",
-        "alstom":"alstom","bajaj auto":"bajaj auto","dassault systemes":"dassault","dassault syst mes":"dassault",
-        "dassault":"dassault","siemens energy":"siemens energy","ge vernova":"ge vernova","jsw energy":"jsw energy",
-        "bellatrix aerospace":"bellatrix","reliance new energy":"reliance new energy","valeo":"valeo",
-        "bosch india":"bosch","bosch":"bosch","mtar technologies":"mtar",
-        "mercedes benz r d india mbrdi":"mercedes","mercedes benz r d":"mercedes","mercedes benz r d india":"mercedes",
-        "honeywell aerospace":"honeywell","honeywell":"honeywell",
-        "tata advanced systems":"tasl","tasl":"tasl","larsen toubro":"l t","l t":"l t",
-    }
-    return aliases.get(value, value)
-
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-def emails_in(v): return EMAIL_RE.findall(clean(v))
-
-def unique_emails(emails):
-    out, seen = [], set()
-    for e in emails:
-        e = clean(e)
-        if not e or e.lower() == "have to find": continue
-        if e.lower() not in seen:
-            seen.add(e.lower()); out.append(e)
-    return out
-
-def detect_col(ws, header):
-    for c in range(1, ws.max_column + 1):
-        if clean(ws.cell(row=1, column=c).value).lower() == header.lower():
-            return c
-    return None
-
-FREE_DOMAINS = {"gmail","yahoo","hotmail","outlook","rediffmail","live",
-                "icloud","protonmail","163","ymail"}
-
-def _domain_root(email_addr):
-    try:
-        root = email_addr.split("@", 1)[1].lower().split(".")[0]
-        return None if root in FREE_DOMAINS else root
-    except Exception:
-        return None
-
-class CompanyResolver:
-    def __init__(self):
-        self.domain_to_key = {}
-        self.name_to_key = {}
-    def key(self, name, emails):
-        nkey = norm(name)
-        roots = set(filter(None, (_domain_root(e) for e in (emails or []))))
-        for rt in roots:
-            if rt in self.domain_to_key:
-                k = self.domain_to_key[rt]
-                self.name_to_key[nkey] = k
-                for r2 in roots: self.domain_to_key.setdefault(r2, k)
-                return k
-        k = self.name_to_key.get(nkey, nkey)
-        self.name_to_key[nkey] = k
-        for rt in roots: self.domain_to_key.setdefault(rt, k)
-        return k
-    def key_for_name_only(self, name):
-        return self.name_to_key.get(norm(name), norm(name))
-    def key_for_emails(self, emails):
-        for e in (emails or []):
-            rt = _domain_root(e)
-            if rt and rt in self.domain_to_key:
-                return self.domain_to_key[rt]
-        return None
-
-# =====================================================================
-# SENT LOG ENGINE  (unchanged logic)
-# =====================================================================
-LOG_HEADERS = ["Company Name","Mail Sent Flag","Mail Sent Date/Time","Emails Sent To",
-               "Mail Reply","Phonic Conversation","Delivery Status","Bounced Emails"]
-
-def get_log_sheet(wb):
-    if LOG_SHEET in wb.sheetnames:
-        ws = wb[LOG_SHEET]
-    else:
-        ws = wb.create_sheet(LOG_SHEET)
-    cols = {}
-    for h in LOG_HEADERS:
-        found_col = None
-        for c in range(1, ws.max_column + 2):
-            val = ws.cell(row=1, column=c).value
-            if val and clean(val).lower() == h.lower():
-                found_col = c
-                break
-        if not found_col:
-            found_col = ws.max_column + 1
-            set_cell(ws, 1, found_col, h)
-        cols[h] = found_col
-    return ws, cols
-
-def read_log_state(ws, cols, resolver):
-    state = {}
-    for r in range(2, ws.max_row + 1):
-        company = clean(ws.cell(row=r, column=cols["Company Name"]).value)
-        if not company: continue
-        tried = emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value))
-        sent_flag = clean(ws.cell(row=r, column=cols["Mail Sent Flag"]).value).upper()
-        sent = sent_flag.startswith("SENT")
-        delivery = clean(ws.cell(row=r, column=cols["Delivery Status"]).value).lower()
-        entry = {"row": r, "sent": sent, "delivery": delivery,
-                  "emails_tried": {e.lower() for e in tried}, "display": company}
-        k_name = resolver.key_for_name_only(company)
-        state[k_name] = entry
-        k_email = resolver.key_for_emails(tried)
-        if k_email:
-            state[k_email] = entry
-    return state
-
-def log_sent(ws, cols, state, resolver, company_display, emails):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-    k = resolver.key_for_emails(emails) or resolver.key_for_name_only(company_display)
-    r_target = None
-    if k in state:
-        r_target = state[k]["row"]
-    else:
-        for val in state.values():
-            if norm(val["display"]) == norm(company_display):
-                r_target = val["row"]; break
-    if r_target:
-        r = r_target
-    else:
-        r = ws.max_row + 1
-        set_cell(ws, r, cols["Company Name"], company_display)
-        state[k] = {"row": r, "sent": True, "delivery": "pending", "emails_tried": set(), "display": company_display}
-    set_cell(ws, r, cols["Mail Sent Flag"], "SENT")
-    set_cell(ws, r, cols["Mail Sent Date/Time"], ts)
-    old = unique_emails(emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value)))
-    merged = unique_emails(old + emails)
-    set_cell(ws, r, cols["Emails Sent To"], ", ".join(merged))
-    if not clean(ws.cell(row=r, column=cols["Delivery Status"]).value):
-        set_cell(ws, r, cols["Delivery Status"], "Pending")
-    if k in state:
-        state[k]["row"] = r; state[k]["sent"] = True
-        state[k]["emails_tried"] |= {e.lower() for e in emails}
-    return ts
-
-# =====================================================================
-# COMPANY READER
-# =====================================================================
-def build_company_data(wb):
-    resolver = CompanyResolver()
-    raw = {s: [] for s in SHEETS}
-
-    for sheet_name in SHEETS:
-        if sheet_name not in wb.sheetnames:
-            continue
-
-        ws = wb[sheet_name]
-        ncol = detect_col(ws, "Company Name")
-        ecol = detect_col(ws, "HR Email")
-
-        if ncol is None or ecol is None:
-            continue
-
-        bucket = None
-
-        for r in range(2, ws.max_row + 1):
-            cn = clean(ws.cell(row=r, column=ncol).value)
-
-            if cn:
-                bucket = {"name": cn, "emails": []}
-                raw[sheet_name].append(bucket)
-
-            if bucket is None:
-                continue
-
-            bucket["emails"].extend(emails_in(ws.cell(row=r, column=ecol).value))
-
-    companies = {}
-    order = {s: [] for s in SHEETS}
-
-    for sheet_name in SHEETS:
-        seen = set()
-
-        for b in raw[sheet_name]:
-            k = resolver.key(b["name"], b["emails"])
-
-            if k not in companies:
-                companies[k] = {
-                    "display": b["name"],
-                    "emails": [],
-                    "sheets": set(),
-                }
-
-            companies[k]["sheets"].add(sheet_name)
-            companies[k]["emails"].extend(b["emails"])
-
-            if k not in seen:
-                order[sheet_name].append(b["name"])
-                seen.add(k)
-
-    # Merge companies/emails discovered from Call Logs.
-    call_log_companies = read_call_log_companies(wb, resolver)
-
-    if call_log_companies:
-        order.setdefault("Call Logs", [])
-
-    for k, d in call_log_companies.items():
-        if k not in companies:
-            companies[k] = {
-                "display": d["display"],
-                "emails": [],
-                "sheets": set(),
-            }
-
-        companies[k]["sheets"].add("Call Logs")
-        companies[k]["emails"].extend(d["emails"])
-
-        if d["display"] not in order["Call Logs"]:
-            order["Call Logs"].append(d["display"])
-
-    for k in companies:
-        companies[k]["emails"] = unique_emails(companies[k]["emails"])
-
-    return companies, order, resolver
-
-# =====================================================================
-# EMAIL BUILD + SEND + SAVE-TO-SENT  (unchanged)
-# =====================================================================
 def body_for(company):
     return f"""Dear {company} Recruitment Team,
 
@@ -665,14 +907,18 @@ Link to Recruiter Portal
 
 For guidance on the registration process and timelines, please refer to the resources below:
 
-- Registration & JNF Creation Tutorial:  Watch Here
+- Registration & JNF Creation Tutorial: Watch Here
 {TUTORIAL}
-- Placement Brochure & Flyer: {DOWNLOADS}
-- Important Timelines: {DOWNLOADS}
+
+- Placement Brochure & Flyer:
+{DOWNLOADS}
+
+- Important Timelines:
+{DOWNLOADS}
 
 We look forward to a meaningful collaboration and welcoming your organisation this season.
 
-For any queries or assistance, feel free to contact undersigned:
+For any queries or assistance, feel free to contact the undersigned:
 
 Mansvi Gour
 Overall Coordinator (PG)
@@ -690,185 +936,1462 @@ met252767@mech.iitd.ac.in
 +91 7715079808
 
 Warm regards,
+
 Aman Vijaypratap Prajapati
-Nucleus Team Member(PG)
+Nucleus Team Member (PG)
 Office of Career Services
 Indian Institute of Technology Delhi
 """
 
-def build_message(company, recipients, brochure_path):
+
+# =====================================================================
+# EMAIL MESSAGE BUILDER
+# =====================================================================
+
+def build_message(
+    company,
+    recipients,
+    brochure_path=None,
+):
+    """
+    Build a raw RFC-compliant email message.
+    """
+
     body = body_for(company)
-    if brochure_path and os.path.isfile(brochure_path):
+
+    if brochure_path and os.path.isfile(
+        brochure_path
+    ):
         msg = MIMEMultipart()
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-        with open(brochure_path, "rb") as f:
-            part = MIMEApplication(f.read(), _subtype="pdf")
-        part.add_header("Content-Disposition", "attachment", filename=os.path.basename(brochure_path))
+
+        msg.attach(
+            MIMEText(
+                body,
+                "plain",
+                "utf-8",
+            )
+        )
+
+        with open(
+            brochure_path,
+            "rb",
+        ) as file_obj:
+
+            part = MIMEApplication(
+                file_obj.read(),
+                _subtype="pdf",
+            )
+
+        part.add_header(
+            "Content-Disposition",
+            "attachment",
+            filename=os.path.basename(
+                brochure_path
+            ),
+        )
+
         msg.attach(part)
+
     else:
-        msg = MIMEText(body, "plain", "utf-8")
+        msg = MIMEText(
+            body,
+            "plain",
+            "utf-8",
+        )
+
     msg["Subject"] = SUBJECT
-    msg["From"] = formataddr((FROM_NAME, FROM_ADDR))
-    msg["To"] = ", ".join(recipients)
-    msg["Cc"] = ", ".join(CC)
-    msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain="mech.iitd.ac.in")
+
+    msg["From"] = formataddr(
+        (
+            FROM_NAME,
+            FROM_ADDR,
+        )
+    )
+
+    msg["To"] = ", ".join(
+        unique_emails(recipients)
+    )
+
+    if CC:
+        msg["Cc"] = ", ".join(CC)
+
+    msg["Date"] = formatdate(
+        localtime=True
+    )
+
+    msg["Message-ID"] = make_msgid(
+        domain="mech.iitd.ac.in"
+    )
+
     return msg.as_string()
 
-class RateLimitHit(Exception): pass
-def is_rate_limit(t):
-    t = str(t).lower()
-    return ("sending rate too high" in t or "policy rejection" in t or "450" in t or "4.7.1" in t)
 
-def send_one(pw, recipients, raw):
-    ctx = ssl.create_default_context()
+# =====================================================================
+# ROUNDCUBE SEND
+# =====================================================================
+
+def send_one_via_roundcube(
+    password,
+    recipients,
+    company,
+    subject=None,
+    body=None,
+    brochure_path=None,
+):
+    """
+    Send one message through Roundcube.
+
+    Roundcube itself stores the sent message in Sent.
+    """
+
+    recipients = unique_emails(
+        recipients
+    )
+
+    if not recipients:
+        raise WebmailSendError(
+            "No recipient email addresses were supplied."
+        )
+
+    session = None
+
+    try:
+        session, token = roundcube_compose_session(
+            password
+        )
+
+        subject = subject or SUBJECT
+        body = body or body_for(company)
+
+        to_field = ", ".join(
+            recipients
+        )
+
+        cc_field = ", ".join(CC)
+        bcc_field = ", ".join(BCC)
+
+        compose_id = getattr(
+            session,
+            "roundcube_compose_id",
+            "",
+        )
+
+        identity = getattr(
+            session,
+            "roundcube_identity",
+            "",
+        )
+
+        if not identity:
+            raise WebmailSendError(
+                "Roundcube sender identity is empty."
+            )
+
+        attachment_token = ""
+
+        if brochure_path:
+            attachment_token = (
+                roundcube_upload_attachment(
+                    session=session,
+                    token=token,
+                    compose_id=compose_id,
+                    brochure_path=brochure_path,
+                )
+            )
+
+        send_url = urljoin(
+            WEBMAIL_URL,
+            (
+                "?_task=mail"
+                "&_unlock=loading"
+                "&_framed=1"
+                "&_action=send"
+            ),
+        )
+
+        payload = {
+            "_token": token,
+            "_task": "mail",
+            "_action": "send",
+
+            "_id": compose_id,
+            "_from": identity,
+
+            "_to": to_field,
+            "_cc": cc_field,
+            "_bcc": bcc_field,
+
+            "_subject": subject,
+            "_message": body,
+
+            "_is_html": "0",
+            "_priority": "0",
+            "_store_target": "Sent",
+
+            "_draft_saveid": "",
+
+            "_attachments": attachment_token,
+
+            "_references": "",
+            "_in_reply_to": "",
+            "_reply_uid": "",
+            "_forward_uid": "",
+            "_draft_uid": "",
+        }
+
+        headers = {
+            "Referer": urljoin(
+                WEBMAIL_URL,
+                "?_task=mail&_action=compose",
+            ),
+            "X-Roundcube-Request": token,
+        }
+
+        response = session.post(
+            send_url,
+            data=payload,
+            headers=headers,
+            timeout=TIMEOUT,
+            allow_redirects=True,
+        )
+
+        response.raise_for_status()
+
+        response_text = response.text or ""
+
+        lower_text = response_text.lower()
+
+        success_markers = [
+            "sent_successfully",
+            "message sent successfully",
+            "message_sent",
+            "message sent",
+        ]
+
+        if any(
+            marker in lower_text
+            for marker in success_markers
+        ):
+            return True
+
+        # Some Roundcube versions redirect to the mail page after
+        # successful sending and do not return the exact marker.
+        if (
+            response.url
+            and "_task=mail" in response.url
+            and response.status_code in (200, 302)
+            and "error" not in lower_text
+        ):
+            logger.info(
+                "Roundcube returned a successful-looking "
+                "mail response."
+            )
+            return True
+
+        message_matches = re.findall(
+            r"(?:show_message|display_message)"
+            r"\((.*?)\)",
+            response_text,
+            re.I | re.S,
+        )
+
+        if message_matches:
+            detail = message_matches[-1][:1000]
+        else:
+            detail = (
+                f"HTTP {response.status_code}; "
+                "Roundcube did not confirm send. "
+                f"Response: {response_text[:1000]}"
+            )
+
+        raise WebmailSendError(detail)
+
+    except requests.RequestException as exc:
+        raise WebmailSendError(
+            f"Roundcube network error: {exc}"
+        ) from exc
+
+    except WebmailSendError:
+        raise
+
+    except Exception as exc:
+        raise WebmailSendError(
+            f"Roundcube send failed: {exc}"
+        ) from exc
+
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+
+
+# =====================================================================
+# SMTP FALLBACK
+# =====================================================================
+
+def is_rate_limit(error):
+    text = str(error).lower()
+
+    return any(
+        phrase in text
+        for phrase in (
+            "sending rate too high",
+            "policy rejection",
+            "450",
+            "4.7.1",
+        )
+    )
+
+
+def send_one(
+    password,
+    recipients,
+    raw_message,
+):
+    """
+    SMTP sender retained for compatibility with the original program.
+    """
+
+    recipients = unique_emails(
+        recipients
+    )
+
+    if not recipients:
+        return False
+
+    context = ssl.create_default_context()
+
     last_error = ""
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
         try:
             if SMTP_PORT == 465:
-                with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx, timeout=TIMEOUT) as server:
-                    server.login(FROM_ADDR, pw)
-                    server.sendmail(FROM_ADDR, recipients + CC + BCC, raw)
+                with smtplib.SMTP_SSL(
+                    SMTP_HOST,
+                    SMTP_PORT,
+                    context=context,
+                    timeout=TIMEOUT,
+                ) as server:
+
+                    server.login(
+                        FROM_ADDR,
+                        password,
+                    )
+
+                    server.sendmail(
+                        FROM_ADDR,
+                        recipients + CC + BCC,
+                        raw_message,
+                    )
+
             else:
-                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT) as server:
+                with smtplib.SMTP(
+                    SMTP_HOST,
+                    SMTP_PORT,
+                    timeout=TIMEOUT,
+                ) as server:
+
                     server.ehlo()
-                    server.starttls(context=ctx)
+
+                    server.starttls(
+                        context=context
+                    )
+
                     server.ehlo()
-                    server.login(FROM_ADDR, pw)
-                    server.sendmail(FROM_ADDR, recipients + CC + BCC, raw)
+
+                    server.login(
+                        FROM_ADDR,
+                        password,
+                    )
+
+                    server.sendmail(
+                        FROM_ADDR,
+                        recipients + CC + BCC,
+                        raw_message,
+                    )
 
             return True
 
-        except Exception as e:
-            last_error = str(e)
-            print(f"SMTP send failed on attempt {attempt}: {last_error}", flush=True)
+        except Exception as exc:
+            last_error = str(exc)
 
-            if is_rate_limit(e):
-                raise RateLimitHit(str(e))
+            logger.error(
+                "SMTP send failed on attempt %s: %s",
+                attempt,
+                last_error,
+            )
+
+            if is_rate_limit(exc):
+                raise RateLimitHit(
+                    last_error
+                )
 
             if attempt < MAX_RETRIES:
                 time.sleep(15)
 
-    print(f"SMTP send ultimately failed: {last_error}", flush=True)
+    logger.error(
+        "SMTP send ultimately failed: %s",
+        last_error,
+    )
+
     return False
 
-def save_to_sent(pw, raw):
+
+# =====================================================================
+# IMAP SENT SAVE
+# =====================================================================
+
+def save_to_sent(
+    password,
+    raw_message,
+):
+    """
+    Save a raw message manually into Sent.
+
+    Normally Roundcube handles this itself.
+    """
+
+    imap = None
+
     try:
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=TIMEOUT)
-        imap.login(FROM_ADDR, pw)
-        imap.append(SENT_FOLDER, "\\Seen", imaplib.Time2Internaldate(time.time()), raw.encode("utf-8"))
-        imap.logout(); return True
-    except Exception:
+        imap = imaplib.IMAP4_SSL(
+            IMAP_HOST,
+            IMAP_PORT,
+            timeout=TIMEOUT,
+        )
+
+        imap.login(
+            FROM_ADDR,
+            password,
+        )
+
+        status, _ = imap.append(
+            SENT_FOLDER,
+            "\\Seen",
+            imaplib.Time2Internaldate(
+                time.time()
+            ),
+            raw_message.encode(
+                "utf-8"
+            ),
+        )
+
+        return status == "OK"
+
+    except Exception as exc:
+        logger.error(
+            "Could not save message to Sent: %s",
+            exc,
+        )
+
         return False
 
-# =====================================================================
-# full-message text extraction (bounces / reconcile)
-# =====================================================================
-def decode_hdr(val):
-    if not val: return ""
-    out = ""
-    for t, e in decode_header(val):
-        out += t.decode(e or "utf-8", "replace") if isinstance(t, bytes) else t
-    return out
-
-def whole_message_text(msg):
-    chunks = []
-    try:
-        for h in ("To", "Cc", "Subject", "X-Failed-Recipients", "Original-Recipient"):
-            v = decode_hdr(msg.get(h))
-            if v: chunks.append(f"{h}: {v}")
-    except Exception:
-        pass
-    def dec(p):
-        try:
-            pl = p.get_payload(decode=True)
-            if pl: return pl.decode(p.get_content_charset() or "utf-8", "replace")
-        except Exception:
-            pass
-        try:
-            return str(p.get_payload())
-        except Exception:
-            return ""
-    if msg.is_multipart():
-        for part in msg.walk():
+    finally:
+        if imap is not None:
             try:
-                for h in ("To","Original-Recipient","Final-Recipient","X-Failed-Recipients"):
-                    hv = decode_hdr(part.get(h))
-                    if hv: chunks.append(f"{h}: {hv}")
+                imap.logout()
             except Exception:
                 pass
-            chunks.append(dec(part))
+
+
+# =====================================================================
+# SENT LOG
+# =====================================================================
+
+LOG_HEADERS = [
+    "Company Name",
+    "Mail Sent Flag",
+    "Mail Sent Date/Time",
+    "Emails Sent To",
+    "Mail Reply",
+    "Phonic Conversation",
+    "Delivery Status",
+    "Bounced Emails",
+]
+
+
+def get_log_sheet(wb):
+    """
+    Get/create Sent Log and guarantee required headers.
+    """
+
+    if LOG_SHEET in wb.sheetnames:
+        ws = wb[LOG_SHEET]
     else:
-        chunks.append(dec(msg))
-    text = "\n".join(c for c in chunks if c)
-    return text + "\n" + re.sub(r"<[^>]+>", " ", text)
+        ws = wb.create_sheet(LOG_SHEET)
+
+    cols = {}
+
+    for header in LOG_HEADERS:
+        found_col = None
+
+        for column in range(
+            1,
+            ws.max_column + 2,
+        ):
+            value = ws.cell(
+                row=1,
+                column=column,
+            ).value
+
+            if (
+                value
+                and clean(value).lower()
+                == header.lower()
+            ):
+                found_col = column
+                break
+
+        if found_col is None:
+            found_col = (
+                ws.max_column + 1
+            )
+
+            set_cell(
+                ws,
+                1,
+                found_col,
+                header,
+            )
+
+        cols[header] = found_col
+
+    return ws, cols
+
+
+def read_log_state(
+    ws,
+    cols,
+    resolver,
+):
+    """
+    Read Sent Log into an in-memory state dictionary.
+    """
+
+    state = {}
+
+    for row in range(
+        2,
+        ws.max_row + 1,
+    ):
+        company = clean(
+            ws.cell(
+                row=row,
+                column=cols["Company Name"],
+            ).value
+        )
+
+        if not company:
+            continue
+
+        tried = emails_in(
+            clean(
+                ws.cell(
+                    row=row,
+                    column=cols["Emails Sent To"],
+                ).value
+            )
+        )
+
+        sent_flag = clean(
+            ws.cell(
+                row=row,
+                column=cols["Mail Sent Flag"],
+            ).value
+        ).upper()
+
+        sent = sent_flag.startswith(
+            "SENT"
+        )
+
+        delivery = clean(
+            ws.cell(
+                row=row,
+                column=cols["Delivery Status"],
+            ).value
+        ).lower()
+
+        entry = {
+            "row": row,
+            "sent": sent,
+            "delivery": delivery,
+            "emails_tried": {
+                email_addr.lower()
+                for email_addr in tried
+            },
+            "display": company,
+        }
+
+        name_key = resolver.key_for_name_only(
+            company
+        )
+
+        state[name_key] = entry
+
+        email_key = resolver.key_for_emails(
+            tried
+        )
+
+        if email_key:
+            state[email_key] = entry
+
+    return state
+
+
+def log_sent(
+    ws,
+    cols,
+    state,
+    resolver,
+    company_display,
+    emails,
+):
+    """
+    Mark a company as SENT and merge recipient emails.
+    """
+
+    timestamp = datetime.now().strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+    emails = unique_emails(
+        emails
+    )
+
+    key = (
+        resolver.key_for_emails(emails)
+        or resolver.key_for_name_only(
+            company_display
+        )
+    )
+
+    target_row = None
+
+    if key in state:
+        target_row = state[key]["row"]
+
+    else:
+        for value in state.values():
+            if norm(
+                value["display"]
+            ) == norm(company_display):
+
+                target_row = value["row"]
+                break
+
+    if target_row:
+        row = target_row
+
+    else:
+        row = ws.max_row + 1
+
+        set_cell(
+            ws,
+            row,
+            cols["Company Name"],
+            company_display,
+        )
+
+        state[key] = {
+            "row": row,
+            "sent": True,
+            "delivery": "pending",
+            "emails_tried": set(),
+            "display": company_display,
+        }
+
+    set_cell(
+        ws,
+        row,
+        cols["Mail Sent Flag"],
+        "SENT",
+    )
+
+    set_cell(
+        ws,
+        row,
+        cols["Mail Sent Date/Time"],
+        timestamp,
+    )
+
+    old_emails = unique_emails(
+        emails_in(
+            clean(
+                ws.cell(
+                    row=row,
+                    column=cols["Emails Sent To"],
+                ).value
+            )
+        )
+    )
+
+    merged = unique_emails(
+        old_emails + emails
+    )
+
+    set_cell(
+        ws,
+        row,
+        cols["Emails Sent To"],
+        ", ".join(merged),
+    )
+
+    if not clean(
+        ws.cell(
+            row=row,
+            column=cols["Delivery Status"],
+        ).value
+    ):
+        set_cell(
+            ws,
+            row,
+            cols["Delivery Status"],
+            "Pending",
+        )
+
+    state[key]["row"] = row
+    state[key]["sent"] = True
+    state[key]["emails_tried"].update(
+        e.lower()
+        for e in emails
+    )
+
+    return timestamp
+
 
 # =====================================================================
-# MODE 1 (logic): CONTINUOUS QUEUE + SEND
+# CALL LOG HELPERS
 # =====================================================================
+
+CALL_LOG_FIELD_ALIASES = {
+    "Company": [
+        "company",
+        "company name",
+    ],
+
+    "Phone Number": [
+        "phone number",
+        "phone",
+        "contact no.",
+        "contact number",
+    ],
+
+    "Incident": [
+        "incident",
+        "status",
+        "notes",
+        "remark",
+        "remarks",
+    ],
+
+    "Date": [
+        "date",
+        "date/time",
+        "date time",
+    ],
+
+    "Caller Name": [
+        "caller name",
+    ],
+
+    "Success Flag": [
+        "success flag",
+    ],
+
+    "HR Name": [
+        "hr name",
+    ],
+
+    "HR Email": [
+        "hr email",
+    ],
+}
+
+
+def _header_key(value):
+    """
+    Normalize workbook headers.
+    """
+
+    return re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        clean(value).lower(),
+    ).strip()
+
+
+def get_call_log_sheet(wb):
+    """
+    Get/create Call Logs and ensure all required columns exist.
+    """
+
+    target = CALL_LOG_SHEET.strip().lower()
+
+    existing_name = None
+
+    for name in wb.sheetnames:
+        if name.strip().lower() == target:
+            existing_name = name
+            break
+
+    if existing_name:
+        ws = wb[existing_name]
+    else:
+        ws = wb.create_sheet(
+            CALL_LOG_SHEET
+        )
+
+    header_map = {}
+
+    for column in range(
+        1,
+        ws.max_column + 1,
+    ):
+        value = ws.cell(
+            row=1,
+            column=column,
+        ).value
+
+        key = _header_key(value)
+
+        if key:
+            header_map[key] = column
+
+    cols = {}
+
+    for field, aliases in CALL_LOG_FIELD_ALIASES.items():
+
+        found_col = None
+
+        for alias in aliases:
+            alias_key = _header_key(
+                alias
+            )
+
+            if alias_key in header_map:
+                found_col = header_map[
+                    alias_key
+                ]
+                break
+
+        if found_col is None:
+            found_col = (
+                ws.max_column + 1
+            )
+
+            set_cell(
+                ws,
+                1,
+                found_col,
+                field,
+            )
+
+            header_map[
+                _header_key(field)
+            ] = found_col
+
+        cols[field] = found_col
+
+    return ws, cols
+
+
+def append_call_logs(
+    wb,
+    entries,
+):
+    """
+    Append call-log records and save workbook.
+
+    Returns:
+        number of rows added
+    """
+
+    if not entries:
+        return 0
+
+    ws, cols = get_call_log_sheet(
+        wb
+    )
+
+    added = 0
+
+    for entry in entries:
+
+        row = ws.max_row + 1
+
+        success_flag = clean(
+            entry.get(
+                "success_flag",
+                "0",
+            )
+        )
+
+        success_flag = (
+            "1"
+            if success_flag == "1"
+            else "0"
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Company"],
+            clean(
+                entry.get(
+                    "company",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Phone Number"],
+            clean(
+                entry.get(
+                    "phone",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Incident"],
+            clean(
+                entry.get(
+                    "incident",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Date"],
+            clean(
+                entry.get(
+                    "date",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Caller Name"],
+            clean(
+                entry.get(
+                    "caller_name",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Success Flag"],
+            success_flag,
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["HR Name"],
+            clean(
+                entry.get(
+                    "hr_name",
+                    "",
+                )
+            ),
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["HR Email"],
+            clean(
+                entry.get(
+                    "hr_email",
+                    "",
+                )
+            ),
+        )
+
+        added += 1
+
+    wb.save()
+
+    return added
+
+
+# =====================================================================
+# COMPANY DATA
+# =====================================================================
+
+def build_company_data(wb):
+    """
+    Read all company data from the four primary sheets plus Call Logs.
+
+    Returns:
+        companies
+        order
+        resolver
+    """
+
+    resolver = CompanyResolver()
+
+    raw = {
+        sheet: []
+        for sheet in SHEETS
+    }
+
+    for sheet_name in SHEETS:
+
+        if sheet_name not in wb.sheetnames:
+            continue
+
+        ws = wb[sheet_name]
+
+        name_col = detect_col(
+            ws,
+            "Company Name",
+        )
+
+        email_col = detect_col(
+            ws,
+            "HR Email",
+        )
+
+        if (
+            name_col is None
+            or email_col is None
+        ):
+            continue
+
+        bucket = None
+
+        for row in range(
+            2,
+            ws.max_row + 1,
+        ):
+
+            company_name = clean(
+                ws.cell(
+                    row=row,
+                    column=name_col,
+                ).value
+            )
+
+            if company_name:
+                bucket = {
+                    "name": company_name,
+                    "emails": [],
+                }
+
+                raw[
+                    sheet_name
+                ].append(bucket)
+
+            if bucket is None:
+                continue
+
+            bucket["emails"].extend(
+                emails_in(
+                    ws.cell(
+                        row=row,
+                        column=email_col,
+                    ).value
+                )
+            )
+
+    companies = {}
+
+    order = {
+        sheet: []
+        for sheet in SHEETS
+    }
+
+    for sheet_name in SHEETS:
+
+        seen = set()
+
+        for bucket in raw[sheet_name]:
+
+            key = resolver.key(
+                bucket["name"],
+                bucket["emails"],
+            )
+
+            if key not in companies:
+                companies[key] = {
+                    "display": bucket["name"],
+                    "emails": [],
+                    "sheets": set(),
+                }
+
+            companies[key]["sheets"].add(
+                sheet_name
+            )
+
+            companies[key]["emails"].extend(
+                bucket["emails"]
+            )
+
+            if key not in seen:
+                order[
+                    sheet_name
+                ].append(
+                    bucket["name"]
+                )
+
+                seen.add(key)
+
+    # ---------------------------------------------------------------
+    # Merge Call Logs
+    # ---------------------------------------------------------------
+
+    call_log_companies = (
+        read_call_log_companies(
+            wb,
+            resolver,
+        )
+    )
+
+    if call_log_companies:
+        order["Call Logs"] = []
+
+    for key, data in (
+        call_log_companies.items()
+    ):
+
+        if key not in companies:
+            companies[key] = {
+                "display": data["display"],
+                "emails": [],
+                "sheets": set(),
+            }
+
+        companies[key]["sheets"].add(
+            "Call Logs"
+        )
+
+        companies[key]["emails"].extend(
+            data["emails"]
+        )
+
+        if data["display"] not in order[
+            "Call Logs"
+        ]:
+            order[
+                "Call Logs"
+            ].append(
+                data["display"]
+            )
+
+    # ---------------------------------------------------------------
+    # Final cleanup
+    # ---------------------------------------------------------------
+
+    for key in companies:
+
+        companies[key]["emails"] = (
+            unique_emails(
+                companies[key]["emails"]
+            )
+        )
+
+    return (
+        companies,
+        order,
+        resolver,
+    )
+
+
+# =====================================================================
+# CONTINUOUS QUEUE
+# =====================================================================
+
 def build_continuous_queue(wb):
-    companies, order, resolver = build_company_data(wb)
-    log_ws, cols = get_log_sheet(wb)
-    state = read_log_state(log_ws, cols, resolver)
+    """
+    Build the next batch of companies according to PER_SHEET.
 
-    def skip_and_emails(k, sheet_emails, disp):
-        st = state.get(k)
-        if not st:
-            k_email = resolver.key_for_emails(sheet_emails)
-            st = state.get(k_email) if k_email else None
-        if not st:
-            for val in state.values():
-                if norm(val["display"]) == norm(disp):
-                    st = val; break
-        if not st or not st["sent"]:
-            return (False, sheet_emails)
-        if st["delivery"] == "all failed":
-            new = [e for e in sheet_emails if e.lower() not in st["emails_tried"]]
-            return (False, new) if new else (True, [])
-        return (True, [])
+    Returns:
+        queue, resolver
+    """
 
-    pointers = {s: 0 for s in SHEETS}
-    used = set(); queue = []
-    while any(pointers[s] < len(order.get(s, [])) for s in SHEETS):
+    companies, order, resolver = (
+        build_company_data(wb)
+    )
+
+    log_ws, cols = get_log_sheet(
+        wb
+    )
+
+    state = read_log_state(
+        log_ws,
+        cols,
+        resolver,
+    )
+
+    def skip_and_emails(
+        key,
+        sheet_emails,
+        display_name,
+    ):
+        state_entry = state.get(key)
+
+        if not state_entry:
+            email_key = (
+                resolver.key_for_emails(
+                    sheet_emails
+                )
+            )
+
+            if email_key:
+                state_entry = state.get(
+                    email_key
+                )
+
+        if not state_entry:
+            for value in state.values():
+                if norm(
+                    value["display"]
+                ) == norm(display_name):
+                    state_entry = value
+                    break
+
+        if (
+            not state_entry
+            or not state_entry["sent"]
+        ):
+            return False, sheet_emails
+
+        # If every previous address failed,
+        # allow new addresses to be tried.
+        if state_entry[
+            "delivery"
+        ] == "all failed":
+
+            new_emails = [
+                email_addr
+                for email_addr in sheet_emails
+                if email_addr.lower()
+                not in state_entry[
+                    "emails_tried"
+                ]
+            ]
+
+            if new_emails:
+                return False, new_emails
+
+            return True, []
+
+        return True, []
+
+    pointers = {
+        sheet: 0
+        for sheet in SHEETS
+    }
+
+    used = set()
+
+    queue = []
+
+    while any(
+        pointers[sheet]
+        < len(order.get(sheet, []))
+        for sheet in SHEETS
+    ):
+
         added = False
-        for s in SHEETS:
+
+        for sheet in SHEETS:
+
             picked = 0
-            lst = order.get(s, [])
-            while pointers[s] < len(lst) and picked < PER_SHEET:
-                disp = lst[pointers[s]]; pointers[s] += 1
-                k = resolver.key_for_name_only(disp)
-                data = companies.get(k)
+
+            company_list = order.get(
+                sheet,
+                [],
+            )
+
+            while (
+                pointers[sheet]
+                < len(company_list)
+                and picked < PER_SHEET
+            ):
+
+                display_name = company_list[
+                    pointers[sheet]
+                ]
+
+                pointers[sheet] += 1
+
+                key = resolver.key_for_name_only(
+                    display_name
+                )
+
+                data = companies.get(
+                    key
+                )
+
                 if data is None:
-                    for kk, dd in companies.items():
-                        if norm(dd["display"]) == norm(disp):
-                            k, data = kk, dd; break
-                if not k or k in used or data is None or not data["emails"]:
+                    for (
+                        possible_key,
+                        possible_data,
+                    ) in companies.items():
+
+                        if norm(
+                            possible_data[
+                                "display"
+                            ]
+                        ) == norm(
+                            display_name
+                        ):
+                            key = possible_key
+                            data = possible_data
+                            break
+
+                if (
+                    not key
+                    or key in used
+                    or data is None
+                    or not data["emails"]
+                ):
                     continue
-                skip, emails_to_use = skip_and_emails(k, data["emails"], disp)
-                if skip or not emails_to_use:
-                    used.add(k); continue
-                used.add(k)
-                queue.append({"sheet": s, "company": data["display"], "key": k, "emails": emails_to_use})
-                picked += 1; added = True
-        if not added: break
+
+                skip, emails_to_use = (
+                    skip_and_emails(
+                        key,
+                        data["emails"],
+                        display_name,
+                    )
+                )
+
+                if (
+                    skip
+                    or not emails_to_use
+                ):
+                    used.add(key)
+                    continue
+
+                used.add(key)
+
+                queue.append(
+                    {
+                        "sheet": sheet,
+                        "company": data[
+                            "display"
+                        ],
+                        "key": key,
+                        "emails": emails_to_use,
+                    }
+                )
+
+                picked += 1
+                added = True
+
+        if not added:
+            break
+
     return queue, resolver
 
-def send_continuous_batch(wb, items, pw, brochure_path, progress_cb=None, delay=DELAY_SEC):
-    """items: list of {sheet, company, key, emails} selected by the user.
-    Returns list of result dicts. Saves after every send.
-    Uses IITD Roundcube webmail instead of SMTP because SMTP is blocked from Render.
+
+# =====================================================================
+# CONTINUOUS SEND
+# =====================================================================
+
+def send_continuous_batch(
+    wb,
+    items,
+    pw,
+    brochure_path,
+    progress_cb=None,
+    delay=DELAY_SEC,
+):
     """
-    log_ws, cols = get_log_sheet(wb)
-    _, _, resolver = build_company_data(wb)
-    state = read_log_state(log_ws, cols, resolver)
+    Send selected queue items one by one.
+
+    Workbook is saved after every successful/failed attempt.
+    """
+
+    if not items:
+        return []
+
+    log_ws, cols = get_log_sheet(
+        wb
+    )
+
+    _, _, resolver = (
+        build_company_data(wb)
+    )
+
+    state = read_log_state(
+        log_ws,
+        cols,
+        resolver,
+    )
+
     results = []
 
-    for i, it in enumerate(items):
-        company, recipients = it["company"], it["emails"]
+    for index, item in enumerate(
+        items
+    ):
+
+        company = clean(
+            item.get(
+                "company",
+                "",
+            )
+        )
+
+        recipients = unique_emails(
+            item.get(
+                "emails",
+                [],
+            )
+        )
+
+        if not company:
+            result = {
+                "company": "",
+                "status": "FAILED",
+                "detail": "Company name is empty.",
+            }
+
+            results.append(result)
+
+            if progress_cb:
+                progress_cb(result)
+
+            continue
+
+        if not recipients:
+            result = {
+                "company": company,
+                "status": "FAILED",
+                "detail": "No recipient email address.",
+            }
+
+            results.append(result)
+
+            if progress_cb:
+                progress_cb(result)
+
+            continue
 
         try:
-            ok = send_one_via_roundcube(
+            send_one_via_roundcube(
                 password=pw,
                 recipients=recipients,
                 company=company,
@@ -876,240 +2399,1017 @@ def send_continuous_batch(wb, items, pw, brochure_path, progress_cb=None, delay=
                 body=body_for(company),
                 brochure_path=brochure_path,
             )
-        except Exception as e:
-            wb.save()
-            results.append({
+
+        except Exception as exc:
+
+            try:
+                wb.save()
+            except Exception:
+                pass
+
+            result = {
                 "company": company,
                 "status": "FAILED",
-                "detail": str(e),
-            })
+                "detail": str(exc),
+            }
+
+            results.append(result)
+
             if progress_cb:
-                progress_cb(results[-1])
+                progress_cb(result)
+
+            # Stop batch on send failure, matching original behavior.
             break
 
-        if not ok:
-            wb.save()
-            results.append({
-                "company": company,
-                "status": "FAILED",
-                "detail": "Roundcube send returned False.",
-            })
-            if progress_cb:
-                progress_cb(results[-1])
-            break
+        timestamp = log_sent(
+            log_ws,
+            cols,
+            state,
+            resolver,
+            company,
+            recipients,
+        )
 
-        # Roundcube normally saves sent messages itself.
-        saved = True
-
-        ts = log_sent(log_ws, cols, state, resolver, company, recipients)
         wb.save()
 
-        results.append({
+        result = {
             "company": company,
             "status": "SENT",
-            "time": ts,
-            "saved_to_sent": saved,
-        })
+            "time": timestamp,
+            "saved_to_sent": True,
+        }
+
+        results.append(result)
 
         if progress_cb:
-            progress_cb(results[-1])
+            progress_cb(result)
 
-        if i < len(items) - 1:
-            time.sleep(delay)
+        if index < len(items) - 1:
+            time.sleep(
+                max(0, delay)
+            )
 
     return results
 
-# =====================================================================
-# MODE 2 (logic): SINGLE COMPANY SEARCH + SEND
-# =====================================================================
-def find_matches(query, companies):
-    q = norm(query)
-    if q in companies: return [q]
-    m = []
-    for k, d in companies.items():
-        dn = norm(d["display"])
-        if q in k or q in dn: m.append(k); continue
-        qw, cw = set(q.split()), set(dn.split())
-        if qw and qw.issubset(cw): m.append(k)
-    if m: return m
-    return difflib.get_close_matches(q, list(companies.keys()), n=8, cutoff=0.35)
 
-def search_company(wb, query):
-    companies, _, resolver = build_company_data(wb)
-    log_ws, cols = get_log_sheet(wb)
-    state = read_log_state(log_ws, cols, resolver)
-    matches = find_matches(query, companies)
-    out = []
-    for k in matches:
-        st = state.get(k)
-        if not st:
-            for val in state.values():
-                if norm(val["display"]) == norm(companies[k]["display"]):
-                    st = val; break
-        out.append({
-            "key": k,
-            "display": companies[k]["display"],
-            "emails": companies[k]["emails"],
-            "sheets": sorted(companies[k]["sheets"]),
-            "already_sent": bool(st and st["sent"]),
-            "delivery": (st["delivery"] if st else "") or "",
-            "tried": sorted(st["emails_tried"]) if st else [],
-        })
-    return out
+# =====================================================================
+# COMPANY SEARCH
+# =====================================================================
 
-def send_single(wb, key, company_display, recipients, brochure_path, pw):
-    companies, _, resolver = build_company_data(wb)
-    log_ws, cols = get_log_sheet(wb)
-    state = read_log_state(log_ws, cols, resolver)
+def find_matches(
+    query,
+    companies,
+):
+    """
+    Search companies by:
+    1. exact key
+    2. substring
+    3. word containment
+    4. fuzzy match
+    """
+
+    query_normalized = norm(
+        query
+    )
+
+    if not query_normalized:
+        return []
+
+    if query_normalized in companies:
+        return [
+            query_normalized
+        ]
+
+    matches = []
+
+    for key, data in companies.items():
+
+        display_normalized = norm(
+            data["display"]
+        )
+
+        if (
+            query_normalized in key
+            or query_normalized
+            in display_normalized
+        ):
+            matches.append(key)
+            continue
+
+        query_words = set(
+            query_normalized.split()
+        )
+
+        company_words = set(
+            display_normalized.split()
+        )
+
+        if (
+            query_words
+            and query_words.issubset(
+                company_words
+            )
+        ):
+            matches.append(key)
+
+    if matches:
+        return matches
+
+    return difflib.get_close_matches(
+        query_normalized,
+        list(companies.keys()),
+        n=8,
+        cutoff=0.35,
+    )
+
+
+def search_company(
+    wb,
+    query,
+):
+    """
+    Search companies and return send/log state.
+    """
+
+    companies, _, resolver = (
+        build_company_data(wb)
+    )
+
+    log_ws, cols = get_log_sheet(
+        wb
+    )
+
+    state = read_log_state(
+        log_ws,
+        cols,
+        resolver,
+    )
+
+    matches = find_matches(
+        query,
+        companies,
+    )
+
+    result = []
+
+    for key in matches:
+
+        data = companies[key]
+
+        state_entry = state.get(key)
+
+        if not state_entry:
+            for value in state.values():
+                if norm(
+                    value["display"]
+                ) == norm(
+                    data["display"]
+                ):
+                    state_entry = value
+                    break
+
+        result.append(
+            {
+                "key": key,
+                "display": data[
+                    "display"
+                ],
+                "emails": data[
+                    "emails"
+                ],
+                "sheets": sorted(
+                    data["sheets"]
+                ),
+                "already_sent": bool(
+                    state_entry
+                    and state_entry["sent"]
+                ),
+                "delivery": (
+                    state_entry[
+                        "delivery"
+                    ]
+                    if state_entry
+                    else ""
+                )
+                or "",
+                "tried": sorted(
+                    state_entry[
+                        "emails_tried"
+                    ]
+                )
+                if state_entry
+                else [],
+            }
+        )
+
+    return result
+
+
+# =====================================================================
+# SINGLE SEND
+# =====================================================================
+
+def send_single(
+    wb,
+    key,
+    company_display,
+    recipients,
+    brochure_path,
+    pw,
+):
+    """
+    Send one company email.
+    """
+
+    del key  # Kept for API compatibility.
+
+    company_display = clean(
+        company_display
+    )
+
+    recipients = unique_emails(
+        recipients
+    )
+
+    if not company_display:
+        return {
+            "status": "FAILED",
+            "detail": "Company name is empty.",
+        }
+
+    if not recipients:
+        return {
+            "status": "FAILED",
+            "detail": "No recipient email addresses.",
+        }
+
+    companies, _, resolver = (
+        build_company_data(wb)
+    )
+
+    log_ws, cols = get_log_sheet(
+        wb
+    )
+
+    state = read_log_state(
+        log_ws,
+        cols,
+        resolver,
+    )
 
     try:
-        ok = send_one_via_roundcube(
+        send_one_via_roundcube(
             password=pw,
             recipients=recipients,
             company=company_display,
             subject=SUBJECT,
-            body=body_for(company_display),
+            body=body_for(
+                company_display
+            ),
             brochure_path=brochure_path,
         )
-    except Exception as e:
-        wb.save()
-        return {"status": "FAILED", "detail": str(e)}
 
-    if not ok:
-        wb.save()
-        return {"status": "FAILED", "detail": "Roundcube send returned False."}
+    except Exception as exc:
 
-    # Roundcube normally saves the sent message itself.
-    saved = True
+        try:
+            wb.save()
+        except Exception:
+            pass
 
-    ts = log_sent(log_ws, cols, state, resolver, company_display, recipients)
+        return {
+            "status": "FAILED",
+            "detail": str(exc),
+        }
+
+    timestamp = log_sent(
+        log_ws,
+        cols,
+        state,
+        resolver,
+        company_display,
+        recipients,
+    )
+
     wb.save()
 
-    return {"status": "SENT", "time": ts, "saved_to_sent": saved}
+    return {
+        "status": "SENT",
+        "time": timestamp,
+        "saved_to_sent": True,
+    }
+
+
 # =====================================================================
-# MODE 3 (logic): CHECK BOUNCES
+# MESSAGE DECODING
 # =====================================================================
+
+def decode_hdr(value):
+    """
+    Decode MIME encoded email headers safely.
+    """
+
+    if not value:
+        return ""
+
+    output = []
+
+    try:
+        parts = decode_header(
+            value
+        )
+
+        for text, encoding in parts:
+
+            if isinstance(
+                text,
+                bytes,
+            ):
+                output.append(
+                    text.decode(
+                        encoding
+                        or "utf-8",
+                        errors="replace",
+                    )
+                )
+            else:
+                output.append(
+                    str(text)
+                )
+
+    except Exception:
+        return clean(value)
+
+    return "".join(
+        output
+    )
+
+
+def _decode_payload(part):
+    """
+    Decode an email MIME part safely.
+    """
+
+    try:
+        payload = part.get_payload(
+            decode=True
+        )
+
+        if payload:
+            charset = (
+                part.get_content_charset()
+                or "utf-8"
+            )
+
+            return payload.decode(
+                charset,
+                errors="replace",
+            )
+
+    except Exception:
+        pass
+
+    try:
+        payload = part.get_payload()
+
+        if isinstance(
+            payload,
+            str,
+        ):
+            return payload
+
+        return str(payload)
+
+    except Exception:
+        return ""
+
+
+def whole_message_text(msg):
+    """
+    Extract useful searchable text from a complete email.
+    """
+
+    chunks = []
+
+    headers = [
+        "To",
+        "Cc",
+        "Subject",
+        "X-Failed-Recipients",
+        "Original-Recipient",
+        "Final-Recipient",
+    ]
+
+    for header in headers:
+        try:
+            value = decode_hdr(
+                msg.get(header)
+            )
+
+            if value:
+                chunks.append(
+                    f"{header}: {value}"
+                )
+
+        except Exception:
+            pass
+
+    if msg.is_multipart():
+
+        for part in msg.walk():
+
+            try:
+                for header in (
+                    "To",
+                    "Original-Recipient",
+                    "Final-Recipient",
+                    "X-Failed-Recipients",
+                ):
+
+                    value = decode_hdr(
+                        part.get(header)
+                    )
+
+                    if value:
+                        chunks.append(
+                            f"{header}: {value}"
+                        )
+
+            except Exception:
+                pass
+
+            content = _decode_payload(
+                part
+            )
+
+            if content:
+                chunks.append(
+                    content
+                )
+
+    else:
+
+        content = _decode_payload(
+            msg
+        )
+
+        if content:
+            chunks.append(
+                content
+            )
+
+    text = "\n".join(
+        chunks
+    )
+
+    # Add a basic HTML-stripped copy as well.
+    stripped_html = re.sub(
+        r"<[^>]+>",
+        " ",
+        text,
+    )
+
+    return (
+        text
+        + "\n"
+        + stripped_html
+    )
+
+
+# =====================================================================
+# BOUNCE DETECTION
+# =====================================================================
+
 def is_bounce(msg):
-    frm = decode_hdr(msg.get("From")).lower()
-    subj = decode_hdr(msg.get("Subject")).lower()
-    ctype = (msg.get_content_type() or "").lower()
-    if "postmaster@" in frm or "mailer-daemon" in frm or "mail delivery" in frm:
+    """
+    Determine whether an email looks like a bounce.
+    """
+
+    sender = decode_hdr(
+        msg.get("From")
+    ).lower()
+
+    subject = decode_hdr(
+        msg.get("Subject")
+    ).lower()
+
+    content_type = (
+        msg.get_content_type()
+        or ""
+    ).lower()
+
+    if (
+        "postmaster@" in sender
+        or "mailer-daemon" in sender
+        or "mail delivery" in sender
+    ):
         return True
-    if ("undeliverable" in subj or "delivery has failed" in subj or
-        "delivery status notification" in subj or "returned mail" in subj or
-        "mail delivery failed" in subj or "failure notice" in subj):
+
+    if any(
+        phrase in subject
+        for phrase in (
+            "undeliverable",
+            "delivery has failed",
+            "delivery status notification",
+            "returned mail",
+            "mail delivery failed",
+            "failure notice",
+        )
+    ):
         return True
-    if "report-type=delivery-status" in ctype or "multipart/report" in ctype:
+
+    if (
+        "report-type=delivery-status"
+        in content_type
+        or "multipart/report"
+        in content_type
+    ):
         return True
+
     return False
 
-def failed_recips_full(msg):
-    text = whole_message_text(msg)
-    failed = []
-    for m in re.finditer(r"Final-Recipient:\s*rfc822;\s*([^\s]+)", text, re.I):
-        e = m.group(1).strip().strip("<>").lower()
-        if EMAIL_RE.fullmatch(e) and e not in failed: failed.append(e)
-    for m in re.finditer(r"(?:X-Failed-Recipients|Original-Recipient)[^\n:]*:\s*(?:rfc822;)?\s*([^\s,;]+)", text, re.I):
-        e = m.group(1).strip().strip("<>").lower()
-        if EMAIL_RE.fullmatch(e) and e not in failed: failed.append(e)
-    blk = re.search(r"failed to these recipients[^\n]*\n(.*?)(?:\n\s*\n|your message)", text, re.I | re.S)
-    if blk:
-        for e in EMAIL_RE.findall(blk.group(1)):
-            if e.lower() not in failed: failed.append(e.lower())
-    our = {a.lower() for a in [FROM_ADDR] + CC + BCC}
-    return [e for e in failed if e not in our]
 
-def check_bounces(wb, pw, days=14):
+def failed_recips_full(msg):
+    """
+    Extract failed recipient addresses from a bounce.
+    """
+
+    text = whole_message_text(
+        msg
+    )
+
+    failed = []
+
+    def add_email(value):
+        value = (
+            clean(value)
+            .strip("<>")
+            .strip()
+            .lower()
+        )
+
+        if (
+            EMAIL_RE.fullmatch(value)
+            and value not in failed
+        ):
+            failed.append(value)
+
+    # RFC 3464.
+    for match in re.finditer(
+        r"Final-Recipient:\s*rfc822;\s*([^\s]+)",
+        text,
+        re.I,
+    ):
+        add_email(
+            match.group(1)
+        )
+
+    # X-Failed-Recipients and Original-Recipient.
+    for match in re.finditer(
+        r"(?:X-Failed-Recipients|Original-Recipient)"
+        r"[^\n:]*:\s*"
+        r"(?:rfc822;)?\s*"
+        r"([^\s,;]+)",
+        text,
+        re.I,
+    ):
+        add_email(
+            match.group(1)
+        )
+
+    # Common human-readable bounce block.
+    block = re.search(
+        r"failed\s+to\s+these\s+recipients"
+        r"[^\n]*\n"
+        r"(.*?)(?:\n\s*\n|your\s+message)",
+        text,
+        re.I | re.S,
+    )
+
+    if block:
+        for email_addr in EMAIL_RE.findall(
+            block.group(1)
+        ):
+            add_email(
+                email_addr
+            )
+
+    own_addresses = {
+        address.lower()
+        for address in (
+            [FROM_ADDR]
+            + CC
+            + BCC
+        )
+    }
+
+    return [
+        email_addr
+        for email_addr in failed
+        if email_addr not in own_addresses
+    ]
+
+
+# =====================================================================
+# CHECK BOUNCES
+# =====================================================================
+
+def check_bounces(
+    wb,
+    pw,
+    days=14,
+):
+    """
+    Scan recent INBOX messages for bounces and update Sent Log.
+    """
+
     bounced = set()
-    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=TIMEOUT)
-    imap.login(FROM_ADDR, pw); imap.select("INBOX")
-    since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
-    typ, data = imap.search(None, f'(SINCE {since})')
-    ids = data[0].split() if data and data[0] else []
-    for num in ids:
-        typ, md = imap.fetch(num, "(RFC822)")
-        if typ != "OK" or not md or not md[0]: continue
-        msg = email.message_from_bytes(md[0][1])
-        if not is_bounce(msg): continue
-        for e in failed_recips_full(msg): bounced.add(e)
-    imap.logout()
+
+    imap = None
+
+    try:
+        imap = imaplib.IMAP4_SSL(
+            IMAP_HOST,
+            IMAP_PORT,
+            timeout=TIMEOUT,
+        )
+
+        imap.login(
+            FROM_ADDR,
+            pw,
+        )
+
+        status, _ = imap.select(
+            "INBOX"
+        )
+
+        if status != "OK":
+            raise RuntimeError(
+                "Could not select INBOX."
+            )
+
+        since_date = (
+            datetime.now()
+            - timedelta(days=days)
+        ).strftime(
+            "%d-%b-%Y"
+        )
+
+        status, data = imap.search(
+            None,
+            f"(SINCE {since_date})",
+        )
+
+        if status != "OK":
+            ids = []
+        else:
+            ids = (
+                data[0].split()
+                if data
+                and data[0]
+                else []
+            )
+
+        for message_id in ids:
+
+            status, message_data = (
+                imap.fetch(
+                    message_id,
+                    "(RFC822)",
+                )
+            )
+
+            if (
+                status != "OK"
+                or not message_data
+            ):
+                continue
+
+            raw = None
+
+            for item in message_data:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) >= 2
+                ):
+                    raw = item[1]
+                    break
+
+            if not raw:
+                continue
+
+            try:
+                msg = (
+                    email.message_from_bytes(
+                        raw
+                    )
+                )
+            except Exception:
+                continue
+
+            if not is_bounce(msg):
+                continue
+
+            bounced.update(
+                failed_recips_full(
+                    msg
+                )
+            )
+
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
     if not bounced:
-        return {"scanned": len(ids), "bounced": [], "updated_rows": []}
+        return {
+            "scanned": len(ids)
+            if "ids" in locals()
+            else 0,
+            "bounced": [],
+            "updated_rows": [],
+        }
 
     if LOG_SHEET not in wb.sheetnames:
-        return {"scanned": len(ids), "bounced": sorted(bounced), "updated_rows": [], "no_log": True}
-    ws, cols = get_log_sheet(wb)
+        return {
+            "scanned": len(ids),
+            "bounced": sorted(
+                bounced
+            ),
+            "updated_rows": [],
+            "no_log": True,
+        }
+
+    ws, cols = get_log_sheet(
+        wb
+    )
+
     updated_rows = []
-    for r in range(2, ws.max_row + 1):
-        company = clean(ws.cell(row=r, column=cols["Company Name"]).value)
-        if not company: continue
-        sent_list = [e.lower() for e in emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value))]
-        if not sent_list: continue
-        failed = [e for e in sent_list if e in bounced]
-        if not failed:      status = "No bounce seen"
-        elif len(failed) == len(sent_list): status = "All Failed"
-        else:               status = "Partial"
-        set_cell(ws, r, cols["Delivery Status"], status)
-        set_cell(ws, r, cols["Bounced Emails"], ", ".join(failed))
+
+    for row in range(
+        2,
+        ws.max_row + 1,
+    ):
+
+        company = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Company Name"
+                ],
+            ).value
+        )
+
+        if not company:
+            continue
+
+        sent_list = [
+            email_addr.lower()
+            for email_addr in emails_in(
+                clean(
+                    ws.cell(
+                        row=row,
+                        column=cols[
+                            "Emails Sent To"
+                        ],
+                    ).value
+                )
+            )
+        ]
+
+        if not sent_list:
+            continue
+
+        failed = [
+            email_addr
+            for email_addr in sent_list
+            if email_addr in bounced
+        ]
+
+        if not failed:
+            status = "No bounce seen"
+
+        elif len(failed) == len(
+            sent_list
+        ):
+            status = "All Failed"
+
+        else:
+            status = "Partial"
+
+        set_cell(
+            ws,
+            row,
+            cols["Delivery Status"],
+            status,
+        )
+
+        set_cell(
+            ws,
+            row,
+            cols["Bounced Emails"],
+            ", ".join(failed),
+        )
+
         if failed:
-            updated_rows.append({"company": company, "status": status, "bounced": failed})
+            updated_rows.append(
+                {
+                    "company": company,
+                    "status": status,
+                    "bounced": failed,
+                }
+            )
+
     wb.save()
-    return {"scanned": len(ids), "bounced": sorted(bounced), "updated_rows": updated_rows}
+
+    return {
+        "scanned": len(ids),
+        "bounced": sorted(
+            bounced
+        ),
+        "updated_rows": updated_rows,
+    }
+
 
 # =====================================================================
-# MODE 4 (logic): RECONCILE SENT FOLDER
+# HR CONTACT DIRECTORY
 # =====================================================================
-GREET_RE = re.compile(r"Dear\s+(.+?)\s+(?:Recruitment\s+)?Team\b", re.I | re.S)
 
-def build_hr_contact_directory(wb, companies, resolver):
-    """Reads all four sheets, returns canonical_company_key -> list of
-    {sheet, company, name, email, phone}. Ported unchanged from ocs_master.py."""
+def build_hr_contact_directory(
+    wb,
+    companies,
+    resolver,
+):
+    """
+    Build:
+
+        company_key -> [
+            {
+                sheet,
+                company,
+                name,
+                email,
+                phone,
+            }
+        ]
+    """
+
+    del companies  # Retained for API compatibility.
+
     contacts = {}
+
     for sheet_name in SHEETS:
+
         if sheet_name not in wb.sheetnames:
             continue
+
         ws = wb[sheet_name]
-        company_col = detect_col(ws, "Company Name")
-        hr_name_col = detect_col(ws, "HR Name")
-        hr_email_col = detect_col(ws, "HR Email")
-        hr_phone_col = detect_col(ws, "HR Phone")
+
+        company_col = detect_col(
+            ws,
+            "Company Name",
+        )
+
+        hr_name_col = detect_col(
+            ws,
+            "HR Name",
+        )
+
+        hr_email_col = detect_col(
+            ws,
+            "HR Email",
+        )
+
+        hr_phone_col = detect_col(
+            ws,
+            "HR Phone",
+        )
+
         if company_col is None:
             continue
+
         current_company_name = None
         current_company_key = None
-        for row in range(2, ws.max_row + 1):
-            company_name = clean(ws.cell(row=row, column=company_col).value)
+
+        for row in range(
+            2,
+            ws.max_row + 1,
+        ):
+
+            company_name = clean(
+                ws.cell(
+                    row=row,
+                    column=company_col,
+                ).value
+            )
+
             if company_name:
-                current_company_name = company_name
-                current_company_key = resolver.key_for_name_only(company_name)
+
+                current_company_name = (
+                    company_name
+                )
+
+                current_company_key = (
+                    resolver.key_for_name_only(
+                        company_name
+                    )
+                )
+
             if current_company_key is None:
                 continue
-            hr_name = clean(ws.cell(row=row, column=hr_name_col).value) if hr_name_col else ""
-            hr_email = clean(ws.cell(row=row, column=hr_email_col).value) if hr_email_col else ""
-            hr_phone = clean(ws.cell(row=row, column=hr_phone_col).value) if hr_phone_col else ""
-            if not hr_name and not hr_email and not hr_phone:
-                continue
-            placeholder_values = {"have to find", "production", "thermal", "industrial", "design", "na"}
-            if (hr_name.lower() in placeholder_values and hr_email.lower() in placeholder_values
-                    and hr_phone.lower() in placeholder_values):
-                continue
-            contacts.setdefault(current_company_key, []).append({
-                "sheet": sheet_name, "company": current_company_name,
-                "name": hr_name, "email": hr_email, "phone": hr_phone,
-            })
-    cleaned = {}
-    for company_key, rows in contacts.items():
-        seen = set(); unique_rows = []
-        for row in rows:
-            row_key = (row["sheet"].lower(), row["name"].lower(), row["email"].lower(), row["phone"].lower())
-            if row_key not in seen:
-                seen.add(row_key); unique_rows.append(row)
-        cleaned[company_key] = unique_rows
-        # Also include contacts discovered from Call Logs.
-    call_log_companies = read_call_log_companies(wb, resolver)
 
-    for company_key, data in call_log_companies.items():
-        cleaned.setdefault(company_key, [])
+            hr_name = (
+                clean(
+                    ws.cell(
+                        row=row,
+                        column=hr_name_col,
+                    ).value
+                )
+                if hr_name_col
+                else ""
+            )
+
+            hr_email = (
+                clean(
+                    ws.cell(
+                        row=row,
+                        column=hr_email_col,
+                    ).value
+                )
+                if hr_email_col
+                else ""
+            )
+
+            hr_phone = (
+                clean(
+                    ws.cell(
+                        row=row,
+                        column=hr_phone_col,
+                    ).value
+                )
+                if hr_phone_col
+                else ""
+            )
+
+            if (
+                not hr_name
+                and not hr_email
+                and not hr_phone
+            ):
+                continue
+
+            placeholder_values = {
+                "have to find",
+                "production",
+                "thermal",
+                "industrial",
+                "design",
+                "na",
+            }
+
+            if (
+                hr_name.lower()
+                in placeholder_values
+                and hr_email.lower()
+                in placeholder_values
+                and hr_phone.lower()
+                in placeholder_values
+            ):
+                continue
+
+            contacts.setdefault(
+                current_company_key,
+                [],
+            ).append(
+                {
+                    "sheet": sheet_name,
+                    "company": current_company_name,
+                    "name": hr_name,
+                    "email": hr_email,
+                    "phone": hr_phone,
+                }
+            )
+
+    # ---------------------------------------------------------------
+    # Merge contacts from Call Logs.
+    # ---------------------------------------------------------------
+
+    call_log_companies = (
+        read_call_log_companies(
+            wb,
+            resolver,
+        )
+    )
+
+    for company_key, data in (
+        call_log_companies.items()
+    ):
+
+        contacts.setdefault(
+            company_key,
+            [],
+        )
 
         existing = {
             (
@@ -1118,10 +3418,16 @@ def build_hr_contact_directory(wb, companies, resolver):
                 row["email"].lower(),
                 row["phone"].lower(),
             )
-            for row in cleaned[company_key]
+            for row in contacts[
+                company_key
+            ]
         }
 
-        for row in data.get("contacts", []):
+        for row in data.get(
+            "contacts",
+            [],
+        ):
+
             row_key = (
                 row["sheet"].lower(),
                 row["name"].lower(),
@@ -1131,271 +3437,744 @@ def build_hr_contact_directory(wb, companies, resolver):
 
             if row_key not in existing:
                 existing.add(row_key)
-                cleaned[company_key].append(row)
-    return cleaned
 
-def hr_lookup(wb, query):
-    """Search companies + return contact rows for matches. Read-only."""
-    companies, _, resolver = build_company_data(wb)
-    contacts = build_hr_contact_directory(wb, companies, resolver)
-    matches = find_matches(query, companies)
-    out = []
-    for k in matches:
-        out.append({
-            "key": k,
-            "display": companies[k]["display"],
-            "sheets": sorted(companies[k]["sheets"]),
-            "contacts": contacts.get(k, []),
-        })
-    return out
+                contacts[
+                    company_key
+                ].append(row)
+
+    return contacts
+
+
+def hr_lookup(
+    wb,
+    query,
+):
+    """
+    Search companies and return HR contacts.
+    """
+
+    companies, _, resolver = (
+        build_company_data(wb)
+    )
+
+    contacts = (
+        build_hr_contact_directory(
+            wb,
+            companies,
+            resolver,
+        )
+    )
+
+    matches = find_matches(
+        query,
+        companies,
+    )
+
+    result = []
+
+    for key in matches:
+
+        data = companies[key]
+
+        result.append(
+            {
+                "key": key,
+                "display": data[
+                    "display"
+                ],
+                "sheets": sorted(
+                    data["sheets"]
+                ),
+                "contacts": contacts.get(
+                    key,
+                    [],
+                ),
+            }
+        )
+
+    return result
+
 
 # =====================================================================
-# CALL LOGS  (append-only into the "Call Logs" sheet)
+# CALL LOG COMPANY READER
 # =====================================================================
-CALL_LOG_SHEET = "Call Logs"
-CALL_LOG_FIELD_ALIASES = {
-    "Company":      ["company", "company name"],
-    "Phone Number": ["phone number", "phone", "contact no.", "contact number"],
-    "Incident":     ["incident", "status", "notes", "remark", "remarks"],
-    "Date":         ["Date"],
-    "Caller Name":  ["Caller Name"], 
-    "Success Flag": ["Success Flag"],
-    "HR Name":      ["HR Name"],
-    "HR Email":     ["HR Email"],
-}
 
-def _header_key(v):
+def read_call_log_companies(
+    wb,
+    resolver=None,
+):
     """
-    Normalize sheet headers so that Date, date, Date/Time, Date Time,
-    date-time etc. can be matched more reliably.
+    Read Call Logs.
+
+    Returns:
+
+        {
+            company_key: {
+                "display": "...",
+                "emails": [...],
+                "contacts": [...]
+            }
+        }
     """
-    return re.sub(r"[^a-z0-9]+", " ", clean(v).lower()).strip()
 
-
-def get_call_log_sheet(wb):
-    target = CALL_LOG_SHEET.strip().lower()
-    existing_name = None
-
-    for name in wb.sheetnames:
-        if name.strip().lower() == target:
-            existing_name = name
-            break
-
-    if existing_name is not None:
-        ws = wb[existing_name]
-    else:
-        ws = wb.create_sheet(CALL_LOG_SHEET)
-
-    header_map = {}
-
-    for c in range(1, ws.max_column + 1):
-        val = ws.cell(row=1, column=c).value
-        hk = _header_key(val)
-        if hk:
-            header_map[hk] = c
-
-    cols = {}
-
-    for field, aliases in CALL_LOG_FIELD_ALIASES.items():
-        found_col = None
-
-        for a in aliases:
-            ak = _header_key(a)
-            if ak in header_map:
-                found_col = header_map[ak]
-                break
-
-        if not found_col:
-            found_col = ws.max_column + 1
-            set_cell(ws, 1, found_col, field)
-            header_map[_header_key(field)] = found_col
-
-        cols[field] = found_col
-
-    return ws, cols
-
-def append_call_logs(wb, entries):
-    """entries: list of call log records. Saves the workbook."""
-    ws, cols = get_call_log_sheet(wb)
-    added = 0
-
-    for e in entries:
-        r = ws.max_row + 1
-
-        success_flag = clean(e.get("success_flag", "0"))
-        success_flag = "1" if success_flag == "1" else "0"
-        
-        set_cell(ws, r, cols["Company"], e.get("company", ""))
-        set_cell(ws, r, cols["Phone Number"], e.get("phone", ""))
-        set_cell(ws, r, cols["Incident"], e.get("incident", ""))
-        set_cell(ws, r, cols["Date"], e.get("date", ""))
-        set_cell(ws, r, cols["Caller Name"], e.get("caller_name", ""))
-        set_cell(ws, r, cols["Success Flag"], success_flag)
-        set_cell(ws, r, cols["HR Name"], e.get("hr_name", ""))
-        set_cell(ws, r, cols["HR Email"], e.get("hr_email", ""))
-
-        added += 1
-
-    wb.save()
-    return added
-
-def read_call_log_companies(wb, resolver=None):
-    """
-    Reads Call Logs and returns company/email/contact data found there.
-
-    Output format:
-    {
-      company_key: {
-        "display": company name,
-        "emails": [...],
-        "contacts": [
-          {
-            "sheet": "Call Logs",
-            "company": company,
-            "name": hr_name,
-            "email": hr_email,
-            "phone": phone,
-          }
-        ]
-      }
-    }
-    """
     if CALL_LOG_SHEET not in wb.sheetnames:
         return {}
 
     if resolver is None:
         resolver = CompanyResolver()
 
-    ws, cols = get_call_log_sheet(wb)
-    out = {}
+    ws, cols = get_call_log_sheet(
+        wb
+    )
 
-    for r in range(2, ws.max_row + 1):
-        company = clean(ws.cell(row=r, column=cols["Company"]).value)
+    result = {}
+
+    for row in range(
+        2,
+        ws.max_row + 1,
+    ):
+
+        company = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Company"
+                ],
+            ).value
+        )
+
         if not company:
             continue
 
-        phone = clean(ws.cell(row=r, column=cols["Phone Number"]).value)
-        hr_name = clean(ws.cell(row=r, column=cols["HR Name"]).value)
-        hr_email_raw = clean(ws.cell(row=r, column=cols["HR Email"]).value)
+        phone = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Phone Number"
+                ],
+            ).value
+        )
 
-        found_emails = unique_emails(emails_in(hr_email_raw))
+        hr_name = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "HR Name"
+                ],
+            ).value
+        )
 
-        key = resolver.key(company, found_emails)
+        hr_email_raw = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "HR Email"
+                ],
+            ).value
+        )
 
-        if key not in out:
-            out[key] = {
+        found_emails = unique_emails(
+            emails_in(
+                hr_email_raw
+            )
+        )
+
+        key = resolver.key(
+            company,
+            found_emails,
+        )
+
+        if key not in result:
+            result[key] = {
                 "display": company,
                 "emails": [],
                 "contacts": [],
             }
 
-        out[key]["emails"].extend(found_emails)
+        result[key]["emails"].extend(
+            found_emails
+        )
 
-        if phone or hr_name or found_emails:
-            out[key]["contacts"].append({
-                "sheet": "Call Logs",
-                "company": company,
-                "name": hr_name,
-                "email": ", ".join(found_emails) if found_emails else hr_email_raw,
-                "phone": phone,
-            })
+        if (
+            phone
+            or hr_name
+            or found_emails
+        ):
+            result[key][
+                "contacts"
+            ].append(
+                {
+                    "sheet": "Call Logs",
+                    "company": company,
+                    "name": hr_name,
+                    "email": (
+                        ", ".join(
+                            found_emails
+                        )
+                        if found_emails
+                        else hr_email_raw
+                    ),
+                    "phone": phone,
+                }
+            )
 
-    for key in out:
-        out[key]["emails"] = unique_emails(out[key]["emails"])
+    # ---------------------------------------------------------------
+    # Deduplicate
+    # ---------------------------------------------------------------
+
+    for key in result:
+
+        result[key]["emails"] = (
+            unique_emails(
+                result[key]["emails"]
+            )
+        )
 
         seen = set()
         unique_contacts = []
 
-        for c in out[key]["contacts"]:
-            ck = (
-                c["sheet"].lower(),
-                c["company"].lower(),
-                c["name"].lower(),
-                c["email"].lower(),
-                c["phone"].lower(),
+        for contact in result[key][
+            "contacts"
+        ]:
+
+            contact_key = (
+                contact["sheet"].lower(),
+                contact["company"].lower(),
+                contact["name"].lower(),
+                contact["email"].lower(),
+                contact["phone"].lower(),
             )
-            if ck not in seen:
-                seen.add(ck)
-                unique_contacts.append(c)
 
-        out[key]["contacts"] = unique_contacts
+            if contact_key not in seen:
+                seen.add(contact_key)
 
-    return out
+                unique_contacts.append(
+                    contact
+                )
 
-def reconcile_sent(wb, pw, days=30):
-    companies, _, resolver = build_company_data(wb)
-    n2d = {norm(d["display"]): d["display"] for d in companies.values()}
+        result[key][
+            "contacts"
+        ] = unique_contacts
 
-    imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=TIMEOUT)
-    imap.login(FROM_ADDR, pw); imap.select(SENT_FOLDER)
-    since = (datetime.now() - timedelta(days=days)).strftime("%d-%b-%Y")
-    typ, data = imap.search(None, f'(SINCE {since})')
-    ids = data[0].split() if data and data[0] else []
+    return result
 
-    our = {a.lower() for a in [FROM_ADDR] + CC + BCC}
-    hits, unattr, matched = {}, [], 0
-    for num in ids:
-        typ, md = imap.fetch(num, "(RFC822)")
-        if typ != "OK" or not md or not md[0]: continue
-        msg = email.message_from_bytes(md[0][1])
-        subj = decode_hdr(msg.get("Subject")).lower()
-        text = whole_message_text(msg)
-        if SUBJECT_KEY not in subj and SUBJECT_KEY not in text.lower():
-            continue
-        matched += 1
-        raw_recips = decode_hdr(msg.get("To")) + " " + decode_hdr(msg.get("Cc"))
-        recips = [e.lower() for e in emails_in(raw_recips) if e.lower() not in our]
-        for m in re.finditer(r"^(?:To|Cc):\s*(.+)$", text, re.I | re.M):
-            for e in emails_in(m.group(1)):
-                if e.lower() not in our and e.lower() not in recips:
-                    recips.append(e.lower())
-        try: dstr = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d %H:%M")
-        except Exception: dstr = ""
-        comp_display = None
-        k = resolver.key_for_emails(recips)
-        if k and k in companies:
-            comp_display = companies[k]["display"]
-        if comp_display is None:
-            g = GREET_RE.search(text)
-            if g:
-                gc = clean(g.group(1)); comp_display = n2d.get(norm(gc), gc)
-        if comp_display is None:
-            for comp_name in sorted(n2d.values(), key=len, reverse=True):
-                if comp_name.lower() in text.lower():
-                    comp_display = comp_name; break
-        if comp_display is None:
-            unattr.append({"to": decode_hdr(msg.get("To")), "date": dstr}); continue
-        rec = hits.setdefault(norm(comp_display), {"display": comp_display, "emails": set(), "date": dstr})
-        for e in recips: rec["emails"].add(e)
-        if dstr and dstr > rec["date"]: rec["date"] = dstr
-    imap.logout()
 
-    ws, cols = get_log_sheet(wb)
+# =====================================================================
+# RECONCILE SENT FOLDER
+# =====================================================================
+
+GREET_RE = re.compile(
+    r"Dear\s+(.+?)\s+(?:Recruitment\s+)?Team\b",
+    re.I | re.S,
+)
+
+
+def reconcile_sent(
+    wb,
+    pw,
+    days=30,
+):
+    """
+    Reconcile messages in Sent against workbook companies.
+    """
+
+    companies, _, resolver = (
+        build_company_data(wb)
+    )
+
+    normalized_to_display = {
+        norm(
+            data["display"]
+        ): data["display"]
+        for data in companies.values()
+    }
+
+    imap = None
+
+    hits = {}
+    unattributed = []
+    matched = 0
+    ids = []
+
+    try:
+        imap = imaplib.IMAP4_SSL(
+            IMAP_HOST,
+            IMAP_PORT,
+            timeout=TIMEOUT,
+        )
+
+        imap.login(
+            FROM_ADDR,
+            pw,
+        )
+
+        status, _ = imap.select(
+            SENT_FOLDER
+        )
+
+        if status != "OK":
+            raise RuntimeError(
+                f"Could not select Sent folder: {SENT_FOLDER}"
+            )
+
+        since_date = (
+            datetime.now()
+            - timedelta(days=days)
+        ).strftime(
+            "%d-%b-%Y"
+        )
+
+        status, data = imap.search(
+            None,
+            f"(SINCE {since_date})",
+        )
+
+        if status == "OK" and data:
+            ids = (
+                data[0].split()
+                if data[0]
+                else []
+            )
+
+        our_addresses = {
+            address.lower()
+            for address in (
+                [FROM_ADDR]
+                + CC
+                + BCC
+            )
+        }
+
+        for message_id in ids:
+
+            status, message_data = (
+                imap.fetch(
+                    message_id,
+                    "(RFC822)",
+                )
+            )
+
+            if (
+                status != "OK"
+                or not message_data
+            ):
+                continue
+
+            raw = None
+
+            for item in message_data:
+                if (
+                    isinstance(item, tuple)
+                    and len(item) >= 2
+                ):
+                    raw = item[1]
+                    break
+
+            if not raw:
+                continue
+
+            try:
+                msg = (
+                    email.message_from_bytes(
+                        raw
+                    )
+                )
+            except Exception:
+                continue
+
+            subject = decode_hdr(
+                msg.get("Subject")
+            ).lower()
+
+            text = whole_message_text(
+                msg
+            )
+
+            combined_lower = (
+                subject
+                + "\n"
+                + text.lower()
+            )
+
+            if (
+                SUBJECT_KEY
+                not in combined_lower
+            ):
+                continue
+
+            matched += 1
+
+            raw_recipient_text = (
+                decode_hdr(
+                    msg.get("To")
+                )
+                + " "
+                + decode_hdr(
+                    msg.get("Cc")
+                )
+            )
+
+            recipients = []
+
+            for address in emails_in(
+                raw_recipient_text
+            ):
+
+                address_lower = (
+                    address.lower()
+                )
+
+                if (
+                    address_lower
+                    not in our_addresses
+                    and address_lower
+                    not in recipients
+                ):
+                    recipients.append(
+                        address_lower
+                    )
+
+            # Also inspect extracted To/Cc lines.
+            for match in re.finditer(
+                r"^(?:To|Cc):\s*(.+)$",
+                text,
+                re.I | re.M,
+            ):
+
+                for address in emails_in(
+                    match.group(1)
+                ):
+
+                    address_lower = (
+                        address.lower()
+                    )
+
+                    if (
+                        address_lower
+                        not in our_addresses
+                        and address_lower
+                        not in recipients
+                    ):
+                        recipients.append(
+                            address_lower
+                        )
+
+            try:
+                date_header = msg.get(
+                    "Date"
+                )
+
+                if date_header:
+                    date_string = (
+                        parsedate_to_datetime(
+                            date_header
+                        ).strftime(
+                            "%Y-%m-%d %H:%M"
+                        )
+                    )
+                else:
+                    date_string = ""
+
+            except Exception:
+                date_string = ""
+
+            company_display = None
+
+            # -------------------------------------------------------
+            # First: email-domain/company resolver.
+            # -------------------------------------------------------
+
+            key = resolver.key_for_emails(
+                recipients
+            )
+
+            if (
+                key
+                and key in companies
+            ):
+                company_display = (
+                    companies[key][
+                        "display"
+                    ]
+                )
+
+            # -------------------------------------------------------
+            # Second: greeting.
+            # -------------------------------------------------------
+
+            if company_display is None:
+
+                greeting_match = (
+                    GREET_RE.search(
+                        text
+                    )
+                )
+
+                if greeting_match:
+
+                    greeting_company = clean(
+                        greeting_match.group(
+                            1
+                        )
+                    )
+
+                    company_display = (
+                        normalized_to_display.get(
+                            norm(
+                                greeting_company
+                            ),
+                            greeting_company,
+                        )
+                    )
+
+            # -------------------------------------------------------
+            # Third: search company name in body.
+            # -------------------------------------------------------
+
+            if company_display is None:
+
+                for company_name in sorted(
+                    normalized_to_display.values(),
+                    key=len,
+                    reverse=True,
+                ):
+
+                    if (
+                        company_name.lower()
+                        in text.lower()
+                    ):
+                        company_display = (
+                            company_name
+                        )
+                        break
+
+            # -------------------------------------------------------
+            # No match.
+            # -------------------------------------------------------
+
+            if company_display is None:
+
+                unattributed.append(
+                    {
+                        "to": decode_hdr(
+                            msg.get("To")
+                        ),
+                        "date": date_string,
+                    }
+                )
+
+                continue
+
+            # -------------------------------------------------------
+            # Aggregate.
+            # -------------------------------------------------------
+
+            normalized_company = norm(
+                company_display
+            )
+
+            record = hits.setdefault(
+                normalized_company,
+                {
+                    "display": company_display,
+                    "emails": set(),
+                    "date": date_string,
+                },
+            )
+
+            record["emails"].update(
+                recipients
+            )
+
+            if (
+                date_string
+                and (
+                    not record["date"]
+                    or date_string
+                    > record["date"]
+                )
+            ):
+                record["date"] = (
+                    date_string
+                )
+
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
+    # ---------------------------------------------------------------
+    # Update Sent Log.
+    # ---------------------------------------------------------------
+
+    ws, cols = get_log_sheet(
+        wb
+    )
+
     log_by_name = {}
-    for r in range(2, ws.max_row + 1):
-        cn = clean(ws.cell(row=r, column=cols["Company Name"]).value)
-        if cn: log_by_name[norm(cn)] = r
-    added = updated = 0
-    for nk, rec in hits.items():
-        emails_sorted = sorted(rec["emails"])
-        if nk in log_by_name:
-            r = log_by_name[nk]
-            if not clean(ws.cell(row=r, column=cols["Mail Sent Flag"]).value).upper().startswith("SENT"):
+
+    for row in range(
+        2,
+        ws.max_row + 1,
+    ):
+
+        company_name = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Company Name"
+                ],
+            ).value
+        )
+
+        if company_name:
+            log_by_name[
+                norm(company_name)
+            ] = row
+
+    added = 0
+    updated = 0
+
+    for normalized_company, record in (
+        hits.items()
+    ):
+
+        emails_sorted = sorted(
+            record["emails"]
+        )
+
+        if normalized_company in log_by_name:
+
+            row = log_by_name[
+                normalized_company
+            ]
+
+            existing_flag = clean(
+                ws.cell(
+                    row=row,
+                    column=cols[
+                        "Mail Sent Flag"
+                    ],
+                ).value
+            ).upper()
+
+            if not existing_flag.startswith(
+                "SENT"
+            ):
                 updated += 1
+
         else:
-            r = ws.max_row + 1
-            set_cell(ws, r, cols["Company Name"], rec["display"])
-            log_by_name[nk] = r; added += 1
-        set_cell(ws, r, cols["Mail Sent Flag"], "SENT")
-        if not clean(ws.cell(row=r, column=cols["Mail Sent Date/Time"]).value) and rec["date"]:
-            set_cell(ws, r, cols["Mail Sent Date/Time"], rec["date"])
-        existing = [e for e in emails_in(clean(ws.cell(row=r, column=cols["Emails Sent To"]).value))]
-        merged = existing[:]
-        for e in emails_sorted:
-            if e not in [x.lower() for x in merged]: merged.append(e)
-        set_cell(ws, r, cols["Emails Sent To"], ", ".join(merged))
-        if not clean(ws.cell(row=r, column=cols["Delivery Status"]).value):
-            set_cell(ws, r, cols["Delivery Status"], "Pending")
+
+            row = ws.max_row + 1
+
+            set_cell(
+                ws,
+                row,
+                cols["Company Name"],
+                record["display"],
+            )
+
+            log_by_name[
+                normalized_company
+            ] = row
+
+            added += 1
+
+        set_cell(
+            ws,
+            row,
+            cols["Mail Sent Flag"],
+            "SENT",
+        )
+
+        existing_date = clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Mail Sent Date/Time"
+                ],
+            ).value
+        )
+
+        if (
+            not existing_date
+            and record["date"]
+        ):
+            set_cell(
+                ws,
+                row,
+                cols[
+                    "Mail Sent Date/Time"
+                ],
+                record["date"],
+            )
+
+        existing_emails = emails_in(
+            clean(
+                ws.cell(
+                    row=row,
+                    column=cols[
+                        "Emails Sent To"
+                    ],
+                ).value
+            )
+        )
+
+        existing_lower = {
+            address.lower()
+            for address in existing_emails
+        }
+
+        merged = list(
+            existing_emails
+        )
+
+        for address in emails_sorted:
+            if (
+                address.lower()
+                not in existing_lower
+            ):
+                merged.append(
+                    address
+                )
+                existing_lower.add(
+                    address.lower()
+                )
+
+        set_cell(
+            ws,
+            row,
+            cols[
+                "Emails Sent To"
+            ],
+            ", ".join(merged),
+        )
+
+        if not clean(
+            ws.cell(
+                row=row,
+                column=cols[
+                    "Delivery Status"
+                ],
+            ).value
+        ):
+            set_cell(
+                ws,
+                row,
+                cols[
+                    "Delivery Status"
+                ],
+                "Pending",
+            )
+
     wb.save()
-    return {"scanned": len(ids), "matched": matched, "added": added, "updated": updated,
-            "unattributed": unattr}
+
+    return {
+        "scanned": len(ids),
+        "matched": matched,
+        "added": added,
+        "updated": updated,
+        "unattributed": unattributed,
+    }
