@@ -98,6 +98,7 @@ SUBJECT_KEY = "iit delhi hiring invitation"
 PER_SHEET = 3
 DELAY_SEC = 10
 TIMEOUT = 20
+ATTACHMENT_UPLOAD_TIMEOUT = 180
 MAX_RETRIES = 1
 
 SHEETS = [
@@ -844,7 +845,7 @@ def roundcube_upload_attachment(
                 data=data,
                 files=files,
                 headers=headers,
-                timeout=TIMEOUT,
+                timeout=ATTACHMENT_UPLOAD_TIMEOUT,
             )
 
         response.raise_for_status()
