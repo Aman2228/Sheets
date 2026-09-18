@@ -4,7 +4,8 @@ app.py — OCS Master, web version.
 Open the same URL from your phone or PC — both use the same Google Sheet.
 
 Security model:
-- APP_PASSWORD gates the whole site when configured.
+- Main menu and non-mail dashboards are public.
+- APP_PASSWORD protects the Mail Dashboard and its private mail tools.
 - SINGLE_SENDER_PASSWORD separately gates the public single-company sender.
 - IITD mailbox password can be supplied through IITD_WEBMAIL_PASSWORD or
   entered in the browser and cached only in server memory for 60 minutes.
@@ -177,17 +178,30 @@ _jobs_lock = threading.Lock()
 # =====================================================================
 
 def login_required(func):
-    """Require the main APP_PASSWORD when configured."""
+    """Legacy decorator retained for compatibility.
+
+    The main menu and non-mail dashboards are intentionally not protected
+    by APP_PASSWORD. Mail routes use mail_login_required instead.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        return func(*args, **kwargs)
+
+    return wrapper
+
+def mail_login_required(func):
+    """Require APP_PASSWORD only for the Mail Dashboard."""
 
     @wraps(func)
     def wrapper(*args, **kwargs):
 
-        if APP_PASSWORD and not session.get("authed"):
+        if APP_PASSWORD and not session.get("mail_authed"):
             next_url = request.full_path
 
             return redirect(
                 url_for(
-                    "login",
+                    "mail_login",
                     next=next_url,
                 )
             )
@@ -195,8 +209,6 @@ def login_required(func):
         return func(*args, **kwargs)
 
     return wrapper
-
-
 def single_sender_required(func):
     """
     Require SINGLE_SENDER_PASSWORD when configured.
@@ -750,13 +762,75 @@ def single_sender_login():
         flash=error,
     )
 
+@app.route("/mail-login", methods=["GET", "POST"])
+def mail_login():
 
+    if not APP_PASSWORD:
+        return redirect(
+            url_for("mail_dashboard")
+        )
+
+    error = None
+
+    if request.method == "POST":
+
+        password = request.form.get(
+            "password",
+            ""
+        )
+
+        if password == APP_PASSWORD:
+
+            session["mail_authed"] = True
+
+            next_url = request.args.get("next")
+
+            if next_url and next_url.startswith("/"):
+                return redirect(next_url)
+
+            return redirect(
+                url_for("mail_dashboard")
+            )
+
+        error = "Wrong password."
+
+    return page(
+        """
+        <div class="card">
+
+          <h2>Mail Dashboard Access</h2>
+
+          <p class="muted">
+            Enter the app password to access
+            the mail dashboard.
+          </p>
+
+          <form method="post">
+
+            <label>Mail dashboard password</label>
+
+            <input
+              type="password"
+              name="password"
+              autofocus
+              required
+            >
+
+            <button type="submit">
+              Enter
+            </button>
+
+          </form>
+
+        </div>
+        """,
+        flash=error,
+    )
 # =====================================================================
 # DASHBOARD
 # =====================================================================
 
 @app.route("/")
-@login_required
 def dashboard():
 
     return page(
@@ -795,7 +869,7 @@ def dashboard():
 # =====================================================================
 
 @app.route("/mail")
-@login_required
+@mail_login_required
 def mail_dashboard():
 
     if IITD_WEBMAIL_PASSWORD:
@@ -884,7 +958,7 @@ def mail_dashboard():
 
 
 @app.route("/forget-password", methods=["POST"])
-@login_required
+@mail_login_required
 def forget_password():
 
     clear_cached_pw()
@@ -933,7 +1007,6 @@ def password_field(label="IITD mailbox password"):
 # =====================================================================
 
 @app.route("/data")
-@login_required
 def sheet_data_view():
 
     try:
@@ -1357,7 +1430,7 @@ def sheet_data_view():
 # =====================================================================
 
 @app.route("/continuous", methods=["GET"])
-@login_required
+@mail_login_required
 def continuous_view():
 
     try:
@@ -1566,7 +1639,7 @@ def _run_continuous_job(
 
 
 @app.route("/continuous/send", methods=["POST"])
-@login_required
+@mail_login_required
 def continuous_send():
 
     try:
@@ -1694,7 +1767,7 @@ def continuous_send():
 
 
 @app.route("/continuous/status/<job_id>")
-@login_required
+@mail_login_required
 def continuous_status(job_id):
 
     with _jobs_lock:
@@ -1823,7 +1896,7 @@ def continuous_status(job_id):
 # =====================================================================
 
 @app.route("/single", methods=["GET"])
-@login_required
+@mail_login_required
 def single_view():
 
     results_html = ""
@@ -1993,7 +2066,7 @@ def single_view():
 
 
 @app.route("/single/send/<key>", methods=["GET", "POST"])
-@login_required
+@mail_login_required
 def single_send_view(key):
 
     try:
@@ -2279,7 +2352,7 @@ def single_send_view(key):
 # =====================================================================
 
 @app.route("/single/new", methods=["GET", "POST"])
-@login_required
+@mail_login_required
 def single_new_company_view():
 
     company_prefill = (
@@ -5138,3 +5211,4 @@ if __name__ == "__main__":
         port=port,
         debug=False,
     )
+
